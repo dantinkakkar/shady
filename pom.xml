@@ -65,6 +65,15 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
                 <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>default-jar</id>
+                        <phase>process-test-classes</phase>
+                        <goals>
+                            <goal>jar</goal>
+                        </goals>
+                    </execution>
+                </executions>
                 <configuration>
                     <archive>
                         <manifestEntries>
@@ -83,7 +92,7 @@
                 <version>3.5.1</version>
                 <executions>
                     <execution>
-                        <phase>package</phase>
+                        <phase>process-test-classes</phase>
                         <goals>
                             <goal>shade</goal>
                         </goals>

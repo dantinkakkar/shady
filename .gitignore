@@ -43,3 +43,4 @@ buildNumber.properties
 *.swo
 *~
 .DS_Store
+META-INF/
