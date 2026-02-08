@@ -45,6 +45,27 @@ public class ShadyAgentTest {
         System.setProperty("java.class.path", newClasspath);
     }
     
+    @org.junit.jupiter.api.AfterAll
+    public static void tearDown() throws Exception {
+        // Restore original classpath
+        if (originalClasspath != null) {
+            System.setProperty("java.class.path", originalClasspath);
+        }
+        
+        // Clean up temporary test directory
+        if (testJarsDir != null && Files.exists(testJarsDir)) {
+            Files.walk(testJarsDir)
+                .sorted((a, b) -> b.compareTo(a)) // Delete files before directories
+                .forEach(path -> {
+                    try {
+                        Files.delete(path);
+                    } catch (IOException e) {
+                        System.err.println("Failed to delete: " + path);
+                    }
+                });
+        }
+    }
+    
     /**
      * Create version 1 JAR with methodA and methodB.
      */

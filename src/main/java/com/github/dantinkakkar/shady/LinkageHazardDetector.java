@@ -104,12 +104,18 @@ public class LinkageHazardDetector {
                 JarEntry entry = entries.nextElement();
                 String name = entry.getName();
                 
-                if (name.endsWith(".class") && !name.contains("$")) {
-                    // Convert path to class name
-                    String className = name.replace("/", ".").substring(0, name.length() - 6);
+                if (name.endsWith(".class")) {
+                    // Extract just the class name (without path) to check for inner classes
+                    String classNamePart = name.substring(name.lastIndexOf('/') + 1);
                     
-                    classLocations.computeIfAbsent(className, k -> new ArrayList<>())
-                            .add(jarFile.getAbsolutePath());
+                    // Skip inner classes (those with $ in the class name itself)
+                    if (!classNamePart.contains("$")) {
+                        // Convert path to class name
+                        String className = name.replace("/", ".").substring(0, name.length() - 6);
+                        
+                        classLocations.computeIfAbsent(className, k -> new ArrayList<>())
+                                .add(jarFile.getAbsolutePath());
+                    }
                 }
             }
         } catch (IOException e) {
