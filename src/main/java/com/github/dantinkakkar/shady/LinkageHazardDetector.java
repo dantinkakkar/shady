@@ -137,6 +137,8 @@ public class LinkageHazardDetector {
     
     /**
      * Scan the runtime classpath for duplicate classes and analyze their methods.
+     * Also proactively analyzes ALL classes to build a complete call graph, since
+     * the JVM loads classes lazily and we need to detect hazards before runtime.
      */
     public void scanClasspath() {
         System.out.println("[Shady] Scanning classpath for duplicate classes...");
@@ -179,6 +181,12 @@ public class LinkageHazardDetector {
         } else {
             System.out.println("[Shady] No duplicate classes found on classpath");
         }
+        
+        // CRITICAL: Proactively analyze ALL classes to detect hazards
+        // Since JVM loads classes lazily, we can't rely on ClassFileTransformer alone
+        System.out.println("[Shady] Proactively analyzing all classes from classpath...");
+        analyzeAllClassesFromClasspath(classLocations);
+        System.out.println("[Shady] Analysis complete");
     }
     
     /**
@@ -547,6 +555,76 @@ public class LinkageHazardDetector {
         methodCallCache.put(cacheKey, methodCalls);
         
         return methodCalls;
+    }
+    
+    /**
+     * Proactively analyze all classes from the classpath to build the complete call graph.
+     * This is necessary because the JVM loads classes lazily - classes that are never
+     * instantiated won't be analyzed by the ClassFileTransformer, but they may still
+     * contain linkage hazards.
+     * 
+     * @param classLocations map of class name to list of JAR paths where it's found
+     */
+    private void analyzeAllClassesFromClasspath(Map<String, List<String>> classLocations) {
+        int totalClasses = 0;
+        int analyzedClasses = 0;
+        
+        for (Map.Entry<String, List<String>> entry : classLocations.entrySet()) {
+            String className = entry.getKey();
+            List<String> jars = entry.getValue();
+            
+            // Skip standard library classes to save time
+            if (isStandardLibraryClass(className)) {
+                continue;
+            }
+            
+            totalClasses++;
+            
+            // Analyze the class from the first JAR (if not duplicate, all versions are the same)
+            // For duplicates, we've already extracted methods, now we need to analyze call sites
+            String jarPath = jars.get(0);
+            
+            try {
+                byte[] classBytes = readClassBytesFromJar(jarPath, className);
+                if (classBytes != null) {
+                    // Use the existing analyzeClass method which builds the call graph
+                    // and checks for hazards
+                    analyzeClass(className, classBytes);
+                    analyzedClasses++;
+                }
+            } catch (Exception e) {
+                // Don't crash - just log and continue
+                System.err.println("[Shady] Warning: Could not analyze " + className + 
+                                 " from " + jarPath + ": " + e.getMessage());
+            }
+        }
+        
+        System.out.println("[Shady] Analyzed " + analyzedClasses + " classes proactively (out of " + 
+                          totalClasses + " non-JDK classes)");
+    }
+    
+    /**
+     * Read class bytecode from a JAR file.
+     * 
+     * @param jarPath path to the JAR file
+     * @param className fully qualified class name (with dots)
+     * @return byte array of class bytecode, or null if not found
+     */
+    private byte[] readClassBytesFromJar(String jarPath, String className) {
+        try (JarFile jar = new JarFile(jarPath)) {
+            String entryName = className.replace(".", "/") + ".class";
+            JarEntry entry = jar.getJarEntry(entryName);
+            
+            if (entry != null) {
+                try (InputStream is = jar.getInputStream(entry)) {
+                    return is.readAllBytes();
+                }
+            }
+        } catch (IOException e) {
+            // Return null on error
+        }
+        
+        return null;
     }
     
     /**
