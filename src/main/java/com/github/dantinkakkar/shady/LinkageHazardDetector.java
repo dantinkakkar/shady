@@ -20,8 +20,12 @@ import java.util.jar.JarFile;
  * and analyzing bytecode for method calls that might not exist in all versions.
  * 
  * <p>This detector performs static analysis of bytecode to identify potential
- * NoSuchMethodError scenarios before they occur at runtime. It builds a call graph
- * and recursively analyzes method invocations to detect transitive hazards.</p>
+ * NoSuchMethodError scenarios before they occur at runtime. It builds a complete call graph
+ * by analyzing <strong>ALL loaded classes</strong> (not just duplicates) and tracking
+ * <strong>ALL method invocation types</strong> (static, virtual, interface, special).</p>
+ * 
+ * <p>The analysis recursively follows method calls transitively, even through non-duplicate
+ * classes, to detect hazards deep in the dependency tree.</p>
  * 
  * <p><strong>Limitation:</strong> This is a static analysis tool and cannot fully handle
  * dynamic dispatch (polymorphism). Method calls on interfaces or abstract classes are
@@ -269,6 +273,21 @@ public class LinkageHazardDetector {
     
     /**
      * Analyze a class's bytecode for potential linkage hazards.
+     * 
+     * <p>This method is called for EVERY class loaded by the JVM, not just duplicate classes.
+     * It builds a complete call graph by tracking all method invocations including:</p>
+     * <ul>
+     *   <li>Static method calls (INVOKESTATIC)</li>
+     *   <li>Virtual method calls (INVOKEVIRTUAL)</li>
+     *   <li>Interface method calls (INVOKEINTERFACE)</li>
+     *   <li>Special method calls (INVOKESPECIAL - constructors, private methods, super calls)</li>
+     * </ul>
+     * 
+     * <p>Even if the analyzed class is not duplicated, its transitive method calls are followed
+     * to detect hazards deeper in the call chain.</p>
+     * 
+     * @param className the name of the class being analyzed
+     * @param classfileBuffer the bytecode of the class
      */
     public void analyzeClass(String className, byte[] classfileBuffer) {
         if (className == null || classfileBuffer == null) {

@@ -99,10 +99,14 @@ The tests automatically run with the `-javaagent` flag configured in Maven Suref
 2. **Classpath Scanning**: All JAR files on the classpath are enumerated and scanned for `.class` files
 3. **Duplicate Detection**: Classes appearing in multiple JARs are identified
 4. **Method Extraction**: For each duplicate, **all methods** (public, protected, package-private, and private, excluding compiler-generated synthetic/bridge methods) are extracted using ASM to ensure complete coverage of the call chain
-5. **Call Graph Construction**: As classes are loaded, method invocations are tracked to build a call graph
+5. **Universal Call Graph Construction**: As **every class** is loaded (not just duplicates), method invocations are tracked to build a complete call graph. This includes:
+   - Static method calls (INVOKESTATIC)
+   - Virtual method calls (INVOKEVIRTUAL)
+   - Interface method calls (INVOKEINTERFACE)
+   - Special method calls (INVOKESPECIAL - constructors, private methods, super calls)
 6. **Bytecode Analysis**: As classes are loaded, their bytecode is analyzed for method calls
 7. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted
-8. **Transitive Analysis**: For duplicate classes, methods are analyzed recursively through the entire call graph, stopping only at standard library classes or cyclic references. Results are cached for performance.
+8. **Transitive Analysis**: Methods are analyzed recursively through the entire call graph, following calls even through non-duplicate classes, stopping only at standard library classes or cyclic references. Results are cached for performance.
 
 The agent uses:
 - **Java Instrumentation API** for bytecode transformation hooks
@@ -110,6 +114,7 @@ The agent uses:
 - **Concurrent data structures** for thread-safe tracking
 - **Intelligent depth traversal** that stops at JDK classes (java.*, javax.*, etc.) to limit scope
 - **Complete method analysis** including private methods to catch all potential linkage issues
+- **Comprehensive invocation tracking** including all method call types (static, virtual, interface, special)
 
 ## Limitations
 
