@@ -332,8 +332,8 @@ public class LinkageHazardDetector {
                             callGraph.computeIfAbsent(currentMethodSig, k -> ConcurrentHashMap.newKeySet())
                                     .add(invocation);
                             
-                            // Check for direct hazards
-                            checkMethodCall(targetClassName, targetMethodSig);
+                            // Check for direct hazards, passing caller information
+                            checkMethodCall(targetClassName, targetMethodSig, currentMethodSig);
                             
                             super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
                         }
@@ -351,7 +351,14 @@ public class LinkageHazardDetector {
      * Check if a method call might be hazardous (direct check only).
      */
     private void checkMethodCall(String targetClassName, String methodSignature) {
-        checkMethodCallTransitive(targetClassName, methodSignature, new HashSet<>(), 0, null);
+        checkMethodCallTransitive(targetClassName, methodSignature, new HashSet<>(), 0, null, null);
+    }
+    
+    /**
+     * Check if a method call might be hazardous (with caller information).
+     */
+    private void checkMethodCall(String targetClassName, String methodSignature, String callerSig) {
+        checkMethodCallTransitive(targetClassName, methodSignature, new HashSet<>(), 0, null, callerSig);
     }
     
     /**
@@ -362,9 +369,11 @@ public class LinkageHazardDetector {
      * @param visited set of already visited methods to prevent cycles
      * @param depth current depth in the call chain
      * @param callChain the chain of calls that led to this point (for debugging)
+     * @param callerSig the signature of the method making this call (call site)
      */
     private void checkMethodCallTransitive(String targetClassName, String methodSignature, 
-                                          Set<String> visited, int depth, List<String> callChain) {
+                                          Set<String> visited, int depth, List<String> callChain,
+                                          String callerSig) {
         String fullMethodSig = targetClassName + "." + methodSignature;
         
         // Prevent infinite loops in cyclic call graphs
@@ -414,6 +423,11 @@ public class LinkageHazardDetector {
                     System.err.println("  Method is missing in: " + missingLocations);
                     System.err.println("  Method is present in: " + presentLocations);
                     
+                    // Report call site information
+                    if (callerSig != null) {
+                        System.err.println("  Called from: " + callerSig);
+                    }
+                    
                     if (depth > 0) {
                         System.err.println("  Detection depth: " + depth + " (transitive call)");
                         System.err.println("  Call chain: " + String.join(" -> ", currentChain));
@@ -431,45 +445,73 @@ public class LinkageHazardDetector {
                 for (String jarPath : presentLocations) {
                     Set<String> variantVisited = new HashSet<>(visited);
                     analyzeTransitiveCalls(jarPath, targetClassName, methodSignature, 
-                                         variantVisited, depth + 1, currentChain);
+                                         variantVisited, depth + 1, currentChain, fullMethodSig);
                 }
             }
         } else {
             // Even if not a duplicate, analyze transitive calls from this method
             // This helps catch cases where a non-duplicate calls a duplicate deeper in the tree
             analyzeTransitiveCallsForNonDuplicate(targetClassName, methodSignature, 
-                                                 visited, depth + 1, currentChain);
+                                                 visited, depth + 1, currentChain, fullMethodSig);
         }
     }
     
     /**
-     * Check if a class is part of the standard library.
-     * Standard library classes are unlikely to have linkage issues and traversing them
-     * would be expensive and unnecessary.
+     * Check if a class is part of the standard library that should definitely stop traversal.
+     * We are more selective here to avoid stopping prematurely in reactive/functional contexts
+     * where standard library classes (like functional interfaces) might be part of the call chain.
      * 
-     * Includes:
-     * - java.* - Core Java classes
-     * - javax.* - Java extensions
-     * - sun.* - Sun/Oracle internal classes
-     * - com.sun.* - Sun/Oracle internal packages
-     * - jdk.* - JDK internal modules (Java 9+)
+     * Only stops at:
+     * - Core JDK internals that are very unlikely to be in application call chains
      * 
-     * Note: This list covers standard OpenJDK/Oracle JDK. Alternative JVM implementations
-     * may have additional packages that should be excluded.
+     * Does NOT stop at:
+     * - java.util.function.* - functional interfaces used in reactive code
+     * - java.util.concurrent.* - may be part of async/reactive chains
+     * - java.util.stream.* - stream processing
      */
     private boolean isStandardLibraryClass(String className) {
-        return className.startsWith("java.") || 
-               className.startsWith("javax.") ||
-               className.startsWith("sun.") ||
-               className.startsWith("com.sun.") ||
-               className.startsWith("jdk.");
+        // Core JDK internals - safe to stop
+        if (className.startsWith("sun.") || 
+            className.startsWith("com.sun.") ||
+            className.startsWith("jdk.internal.")) {
+            return true;
+        }
+        
+        // Java core classes - but exclude functional/reactive packages
+        if (className.startsWith("java.")) {
+            // Don't stop at functional interfaces or concurrent utilities
+            // These are commonly used in reactive chains
+            if (className.startsWith("java.util.function.") ||
+                className.startsWith("java.util.concurrent.") ||
+                className.startsWith("java.util.stream.")) {
+                return false;
+            }
+            
+            // Stop at most other java.* classes
+            return className.startsWith("java.lang.") ||
+                   className.startsWith("java.io.") ||
+                   className.startsWith("java.nio.") ||
+                   className.startsWith("java.math.") ||
+                   className.startsWith("java.net.") ||
+                   className.startsWith("java.time.") ||
+                   className.startsWith("java.text.") ||
+                   className.startsWith("java.security.") ||
+                   className.startsWith("java.sql.");
+        }
+        
+        // javax.* - stop at most of these
+        if (className.startsWith("javax.")) {
+            return true;
+        }
+        
+        return false;
     }
     
     /**
      * Analyze transitive calls from a method in a specific JAR.
      */
     private void analyzeTransitiveCalls(String jarPath, String className, String methodSig,
-                                       Set<String> visited, int depth, List<String> callChain) {
+                                       Set<String> visited, int depth, List<String> callChain, String callerSig) {
         // Extract method calls from this specific method in this JAR
         Set<MethodInvocation> calledMethods = extractMethodCalls(jarPath, className, methodSig);
         
@@ -477,7 +519,7 @@ public class LinkageHazardDetector {
             for (MethodInvocation invocation : calledMethods) {
                 // Pass a fresh copy of the call chain for each invocation
                 checkMethodCallTransitive(invocation.className, invocation.methodSignature,
-                                        visited, depth, new ArrayList<>(callChain));
+                                        visited, depth, new ArrayList<>(callChain), callerSig);
             }
         }
     }
@@ -487,7 +529,7 @@ public class LinkageHazardDetector {
      */
     private void analyzeTransitiveCallsForNonDuplicate(String className, String methodSig,
                                                        Set<String> visited, int depth, 
-                                                       List<String> callChain) {
+                                                       List<String> callChain, String callerSig) {
         String fullMethodSig = className + "." + methodSig;
         Set<MethodInvocation> calledMethods = callGraph.get(fullMethodSig);
         
@@ -495,7 +537,7 @@ public class LinkageHazardDetector {
             for (MethodInvocation invocation : calledMethods) {
                 // Pass a fresh copy of the call chain for each invocation
                 checkMethodCallTransitive(invocation.className, invocation.methodSignature,
-                                        visited, depth, new ArrayList<>(callChain));
+                                        visited, depth, new ArrayList<>(callChain), callerSig);
             }
         }
     }
