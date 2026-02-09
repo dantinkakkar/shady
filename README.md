@@ -8,13 +8,25 @@ Shady is a Java agent that detects latent JVM linkage hazards at startup. It:
 
 1. **Enumerates runtime classpath JARs** - Scans all JARs on the classpath
 2. **Finds duplicate FQNs** - Identifies classes that exist in multiple JARs (common with shading)
-3. **Diffs method sets** - Compares public/protected methods across different versions of the same class
+3. **Diffs method sets** - Compares **all methods** (public, protected, package-private, and private, excluding compiler-generated synthetic/bridge methods) across different versions of the same class
 4. **Scans bytecode** - Uses ASM to analyze loaded bytecode for method call sites
-5. **Warns about hazards** - Emits warnings when code calls methods that don't exist in all versions (without crashing)
+5. **Builds call graphs** - Tracks method invocations to detect deeply nested dependency conflicts
+6. **Warns about hazards** - Emits warnings when code calls methods that don't exist in all versions (without crashing)
+7. **Detects transitive hazards** - Identifies linkage issues in deeply nested method call chains, including private method calls
 
 ## Why do I need this?
 
 When dependencies shade classes or when you have version conflicts, you can end up with multiple versions of the same class on your classpath. Which version gets loaded is often non-deterministic. If code tries to call a method that exists in one version but not another, you'll get a `NoSuchMethodError` at runtime - but only if that code path is executed.
+
+### Transitive Linkage Hazards
+
+Shady now also detects **deeply nested dependency conflicts** where:
+- A method exists in all versions of a duplicate class
+- But that method internally calls another method deeper in the dependency tree
+- And that deeper method doesn't exist in all versions
+- This includes calls to private, package-private, protected, and public methods
+
+**Example:** When including both `spring-boot-starter-webflux:3.4.4` and `io.netty:netty-codec-http:4.1.125.Final`, the `ZlibCodecFactory` class may have the same public API in both versions, but internally they call different helper methods (which may be private) that only exist in one version. Shady now detects these transitive hazards by analyzing the complete call chain.
 
 Shady detects these issues proactively at startup, before they cause production failures.
 
@@ -40,6 +52,7 @@ java -javaagent:shady-1.0-SNAPSHOT.jar -jar your-application.jar
 
 When Shady detects a linkage hazard:
 
+**Direct Hazard:**
 ```
 [Shady] Java agent started - detecting linkage hazards...
 [Shady] Scanning classpath for duplicate classes...
@@ -48,6 +61,18 @@ When Shady detects a linkage hazard:
   Class: com.example.duplicate.DuplicateClass
   Method: methodB()V
   Method is missing in: [/path/to/library-v2.jar]
+  Method is present in: [/path/to/library-v1.jar]
+```
+
+**Transitive Hazard (Deeply Nested):**
+```
+[Shady] WARNING: Linkage hazard detected!
+  Class: io.netty.handler.codec.compression.ZlibEncoderHelper
+  Method: createZlibEncoder()Ljava/lang/Object;
+  Method is missing in: [/path/to/spring-boot-webflux.jar]
+  Method is present in: [/path/to/netty-codec-http.jar]
+  Detection depth: 1 (transitive call)
+  Call chain: io.netty.handler.codec.compression.ZlibCodecFactory.newZlibEncoder()Ljava/lang/Object; -> io.netty.handler.codec.compression.ZlibEncoderHelper.createZlibEncoder()Ljava/lang/Object;
 ```
 
 ## Testing
@@ -58,6 +83,7 @@ The project includes comprehensive JUnit 5 tests that:
 - Verify the agent detects the duplicates
 - Verify warnings are issued for missing methods
 - Verify no warnings for methods present in all versions
+- Test transitive hazard detection with simulated real-world scenarios (e.g., ZlibCodecFactory)
 
 Run tests:
 
@@ -72,14 +98,53 @@ The tests automatically run with the `-javaagent` flag configured in Maven Suref
 1. **Startup**: The agent's `premain` method is called when the JVM starts
 2. **Classpath Scanning**: All JAR files on the classpath are enumerated and scanned for `.class` files
 3. **Duplicate Detection**: Classes appearing in multiple JARs are identified
-4. **Method Extraction**: For each duplicate, public/protected methods are extracted using ASM
-5. **Bytecode Analysis**: As classes are loaded, their bytecode is analyzed for method calls
-6. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted
+4. **Method Extraction**: For each duplicate, **all methods** (public, protected, package-private, and private, excluding compiler-generated synthetic/bridge methods) are extracted using ASM to ensure complete coverage of the call chain
+5. **Proactive Analysis**: **ALL classes** from the classpath are analyzed immediately at startup to build a complete call graph. This is critical because the JVM loads classes lazily - waiting for classes to be loaded would miss hazards in unloaded classes. The analysis includes:
+   - Static method calls (INVOKESTATIC)
+   - Virtual method calls (INVOKEVIRTUAL)
+   - Interface method calls (INVOKEINTERFACE)
+   - Special method calls (INVOKESPECIAL - constructors, private methods, super calls)
+6. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted immediately
+7. **Transitive Analysis**: Methods are analyzed recursively through the entire call graph, following calls even through non-duplicate classes, stopping only at standard library classes or cyclic references. Results are cached for performance.
+8. **Runtime Monitoring**: The ClassFileTransformer continues to monitor any additional classes loaded at runtime
 
 The agent uses:
 - **Java Instrumentation API** for bytecode transformation hooks
 - **ASM library** for bytecode analysis (shaded to avoid conflicts)
 - **Concurrent data structures** for thread-safe tracking
+- **Intelligent depth traversal** that stops at JDK classes (java.*, javax.*, etc.) to limit scope
+- **Complete method analysis** including private methods to catch all potential linkage issues
+- **Comprehensive invocation tracking** including all method call types (static, virtual, interface, special)
+- **Proactive scanning** to detect hazards before classes are loaded
+
+## Limitations
+
+### Dynamic Dispatch (Polymorphism)
+
+Shady performs **static analysis** of bytecode and cannot fully handle dynamic dispatch scenarios where method calls are resolved at runtime based on the actual object type rather than the declared type. This includes:
+
+- **Interface method calls** - When a method is called on an interface reference, the actual implementation depends on the concrete class at runtime
+- **Virtual method calls** - Method calls on superclass references that are overridden in subclasses
+- **Abstract method implementations** - Different concrete implementations of abstract methods
+
+**Example scenario not fully detected:**
+```java
+// Interface with multiple implementations in different JARs
+interface Encoder {
+    void encode();
+}
+
+// v1.jar has: class EncoderV1 implements Encoder { void encode() { helperA(); } }
+// v2.jar has: class EncoderV2 implements Encoder { void encode() { helperB(); } }
+
+// Application code
+Encoder encoder = getEncoder(); // Returns EncoderV1 or EncoderV2
+encoder.encode(); // Shady sees call to Encoder.encode() but can't determine which implementation
+```
+
+In this case, Shady detects issues with direct method calls but may miss transitive issues where different implementations call different helper methods.
+
+**Workaround:** Ensure your dependency management explicitly pins the versions of all transitive dependencies to avoid having multiple implementations on the classpath.
 
 ## CI/CD
 
