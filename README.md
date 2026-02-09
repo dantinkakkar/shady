@@ -8,7 +8,7 @@ Shady is a Java agent that detects latent JVM linkage hazards at startup. It:
 
 1. **Enumerates runtime classpath JARs** - Scans all JARs on the classpath
 2. **Finds duplicate FQNs** - Identifies classes that exist in multiple JARs (common with shading)
-3. **Diffs method sets** - Compares **all methods** (public, protected, package-private, and private) across different versions of the same class
+3. **Diffs method sets** - Compares **all methods** (public, protected, package-private, and private, excluding compiler-generated synthetic/bridge methods) across different versions of the same class
 4. **Scans bytecode** - Uses ASM to analyze loaded bytecode for method call sites
 5. **Builds call graphs** - Tracks method invocations to detect deeply nested dependency conflicts
 6. **Warns about hazards** - Emits warnings when code calls methods that don't exist in all versions (without crashing)
@@ -98,7 +98,7 @@ The tests automatically run with the `-javaagent` flag configured in Maven Suref
 1. **Startup**: The agent's `premain` method is called when the JVM starts
 2. **Classpath Scanning**: All JAR files on the classpath are enumerated and scanned for `.class` files
 3. **Duplicate Detection**: Classes appearing in multiple JARs are identified
-4. **Method Extraction**: For each duplicate, **all methods** (public, protected, package-private, and private) are extracted using ASM to ensure complete coverage of the call chain
+4. **Method Extraction**: For each duplicate, **all methods** (public, protected, package-private, and private, excluding compiler-generated synthetic/bridge methods) are extracted using ASM to ensure complete coverage of the call chain
 5. **Call Graph Construction**: As classes are loaded, method invocations are tracked to build a call graph
 6. **Bytecode Analysis**: As classes are loaded, their bytecode is analyzed for method calls
 7. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted
