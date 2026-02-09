@@ -34,7 +34,7 @@ public class LinkageHazardDetector {
     private final Map<String, Set<MethodInvocation>> callGraph = new ConcurrentHashMap<>();
     
     // Cache for extracted method calls: (jarPath, className, methodSig) -> Set<MethodInvocation>
-    private final Map<String, Set<MethodInvocation>> methodCallCache = new ConcurrentHashMap<>();
+    private final Map<MethodCallCacheKey, Set<MethodInvocation>> methodCallCache = new ConcurrentHashMap<>();
     
     /**
      * Represents a location where a class is found.
@@ -87,6 +87,37 @@ public class LinkageHazardDetector {
         @Override
         public String toString() {
             return className + "." + methodSignature;
+        }
+    }
+    
+    /**
+     * Cache key for extracted method calls.
+     * Using a proper object instead of string concatenation to avoid collision issues.
+     */
+    private static class MethodCallCacheKey {
+        final String jarPath;
+        final String className;
+        final String methodSig;
+        
+        MethodCallCacheKey(String jarPath, String className, String methodSig) {
+            this.jarPath = jarPath;
+            this.className = className;
+            this.methodSig = methodSig;
+        }
+        
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            MethodCallCacheKey that = (MethodCallCacheKey) o;
+            return Objects.equals(jarPath, that.jarPath) &&
+                   Objects.equals(className, that.className) &&
+                   Objects.equals(methodSig, that.methodSig);
+        }
+        
+        @Override
+        public int hashCode() {
+            return Objects.hash(jarPath, className, methodSig);
         }
     }
     
@@ -354,10 +385,13 @@ public class LinkageHazardDetector {
             
             // If the method exists in at least one version, analyze its transitive calls
             // Check all variants to ensure we don't miss hazards
+            // Use a fresh visited set for each variant to avoid one variant's traversal
+            // preventing another from exploring the same methods
             if (!presentLocations.isEmpty()) {
                 for (String jarPath : presentLocations) {
+                    Set<String> variantVisited = new HashSet<>(visited);
                     analyzeTransitiveCalls(jarPath, targetClassName, methodSignature, 
-                                         visited, depth + 1, currentChain);
+                                         variantVisited, depth + 1, currentChain);
                 }
             }
         } else {
@@ -372,6 +406,16 @@ public class LinkageHazardDetector {
      * Check if a class is part of the standard library.
      * Standard library classes are unlikely to have linkage issues and traversing them
      * would be expensive and unnecessary.
+     * 
+     * Includes:
+     * - java.* - Core Java classes
+     * - javax.* - Java extensions
+     * - sun.* - Sun/Oracle internal classes
+     * - com.sun.* - Sun/Oracle internal packages
+     * - jdk.* - JDK internal modules (Java 9+)
+     * 
+     * Note: This list covers standard OpenJDK/Oracle JDK. Alternative JVM implementations
+     * may have additional packages that should be excluded.
      */
     private boolean isStandardLibraryClass(String className) {
         return className.startsWith("java.") || 
@@ -422,7 +466,7 @@ public class LinkageHazardDetector {
      */
     private Set<MethodInvocation> extractMethodCalls(String jarPath, String className, String methodSig) {
         // Create cache key
-        String cacheKey = jarPath + "|" + className + "|" + methodSig;
+        MethodCallCacheKey cacheKey = new MethodCallCacheKey(jarPath, className, methodSig);
         
         // Check cache first
         Set<MethodInvocation> cached = methodCallCache.get(cacheKey);
