@@ -205,7 +205,7 @@ public class LinkageHazardDetector {
         Map<String, Set<String>> methodsByLocation = new HashMap<>();
         
         for (String jarPath : jars) {
-            Set<String> methods = extractPublicProtectedMethods(jarPath, className);
+            Set<String> methods = extractAllMethods(jarPath, className);
             if (methods != null) {
                 methodsByLocation.put(jarPath, methods);
             }
@@ -217,9 +217,11 @@ public class LinkageHazardDetector {
     }
     
     /**
-     * Extract public and protected methods from a class in a JAR.
+     * Extract all methods (public, protected, package-private, and private) from a class in a JAR.
+     * This is necessary because transitive call chains can involve methods of any visibility.
+     * For example, a public method might call a private method that doesn't exist in another version.
      */
-    private Set<String> extractPublicProtectedMethods(String jarPath, String className) {
+    private Set<String> extractAllMethods(String jarPath, String className) {
         Set<String> methods = new HashSet<>();
         
         try (JarFile jar = new JarFile(jarPath)) {
@@ -234,11 +236,12 @@ public class LinkageHazardDetector {
                         @Override
                         public MethodVisitor visitMethod(int access, String name, String descriptor,
                                                           String signature, String[] exceptions) {
-                            // Check if public or protected
-                            boolean isPublic = (access & Opcodes.ACC_PUBLIC) != 0;
-                            boolean isProtected = (access & Opcodes.ACC_PROTECTED) != 0;
+                            // Extract all methods regardless of visibility
+                            // Skip synthetic and bridge methods as they are compiler-generated
+                            boolean isSynthetic = (access & Opcodes.ACC_SYNTHETIC) != 0;
+                            boolean isBridge = (access & Opcodes.ACC_BRIDGE) != 0;
                             
-                            if (isPublic || isProtected) {
+                            if (!isSynthetic && !isBridge) {
                                 methods.add(name + descriptor);
                             }
                             
