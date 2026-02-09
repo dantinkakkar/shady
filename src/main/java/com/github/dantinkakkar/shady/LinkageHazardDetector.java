@@ -36,6 +36,13 @@ public class LinkageHazardDetector {
     // Map of JAR path to all class names contained within (for analysis)
     private final Map<String, Set<String>> jarContents = new ConcurrentHashMap<>();
     
+    // Maximum depth for transitive call analysis to prevent excessive recursion
+    // Depth of 5 allows detection of:
+    // - Level 0: Direct call from application code
+    // - Level 1-4: Up to 4 layers of transitive method calls
+    // This covers most real-world scenarios while limiting performance impact
+    private static final int MAX_TRANSITIVE_DEPTH = 5;
+    
     /**
      * Represents a location where a class is found.
      */
@@ -300,7 +307,7 @@ public class LinkageHazardDetector {
     private void checkMethodCallTransitive(String targetClassName, String methodSignature, 
                                           Set<String> visited, int depth, List<String> callChain) {
         // Limit depth to prevent excessive recursion
-        if (depth > 5) {
+        if (depth > MAX_TRANSITIVE_DEPTH) {
             return;
         }
         
@@ -438,7 +445,9 @@ public class LinkageHazardDetector {
                 }
             }
         } catch (IOException e) {
-            // Ignore errors - just return empty set
+            // Log the error but don't crash - transitive analysis is best-effort
+            System.err.println("[Shady] Warning: Could not analyze transitive calls in " + 
+                             className + "." + methodSig + " from " + jarPath + ": " + e.getMessage());
         }
         
         return methodCalls;

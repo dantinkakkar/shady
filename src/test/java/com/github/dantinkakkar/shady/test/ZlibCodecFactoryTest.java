@@ -12,6 +12,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
@@ -61,7 +62,7 @@ public class ZlibCodecFactoryTest {
         // Clean up temporary test directory
         if (testJarsDir != null && Files.exists(testJarsDir)) {
             Files.walk(testJarsDir)
-                .sorted((a, b) -> b.compareTo(a)) // Delete files before directories
+                .sorted(Comparator.reverseOrder()) // Delete files before directories
                 .forEach(path -> {
                     try {
                         Files.delete(path);
