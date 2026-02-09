@@ -101,12 +101,13 @@ The tests automatically run with the `-javaagent` flag configured in Maven Suref
 5. **Call Graph Construction**: As classes are loaded, method invocations are tracked to build a call graph
 6. **Bytecode Analysis**: As classes are loaded, their bytecode is analyzed for method calls
 7. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted
-8. **Transitive Analysis**: For duplicate classes, methods are analyzed recursively up to 5 levels deep to detect transitive hazards
+8. **Transitive Analysis**: For duplicate classes, methods are analyzed recursively through the entire call graph, stopping only at standard library classes or cyclic references. Results are cached for performance.
 
 The agent uses:
 - **Java Instrumentation API** for bytecode transformation hooks
 - **ASM library** for bytecode analysis (shaded to avoid conflicts)
 - **Concurrent data structures** for thread-safe tracking
+- **Intelligent depth traversal** that stops at JDK classes (java.*, javax.*, etc.) to limit scope
 
 ## CI/CD
 

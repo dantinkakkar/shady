@@ -33,15 +33,8 @@ public class LinkageHazardDetector {
     // Call graph: Maps method (className.methodName+descriptor) to the methods it calls
     private final Map<String, Set<MethodInvocation>> callGraph = new ConcurrentHashMap<>();
     
-    // Map of JAR path to all class names contained within (for analysis)
-    private final Map<String, Set<String>> jarContents = new ConcurrentHashMap<>();
-    
-    // Maximum depth for transitive call analysis to prevent excessive recursion
-    // Depth of 5 allows detection of:
-    // - Level 0: Direct call from application code
-    // - Level 1-4: Up to 4 layers of transitive method calls
-    // This covers most real-world scenarios while limiting performance impact
-    private static final int MAX_TRANSITIVE_DEPTH = 5;
+    // Cache for extracted method calls: (jarPath, className, methodSig) -> Set<MethodInvocation>
+    private final Map<String, Set<MethodInvocation>> methodCallCache = new ConcurrentHashMap<>();
     
     /**
      * Represents a location where a class is found.
@@ -148,7 +141,6 @@ public class LinkageHazardDetector {
      */
     private void scanJar(File jarFile, Map<String, List<String>> classLocations) {
         try (JarFile jar = new JarFile(jarFile)) {
-            Set<String> classesInJar = new HashSet<>();
             String jarPath = jarFile.getAbsolutePath();
             
             Enumeration<JarEntry> entries = jar.entries();
@@ -167,13 +159,9 @@ public class LinkageHazardDetector {
                         
                         classLocations.computeIfAbsent(className, k -> new ArrayList<>())
                                 .add(jarPath);
-                        classesInJar.add(className);
                     }
                 }
             }
-            
-            // Store jar contents for later analysis
-            jarContents.put(jarPath, classesInJar);
         } catch (IOException e) {
             System.err.println("[Shady] Error scanning JAR " + jarFile + ": " + e.getMessage());
         }
@@ -306,11 +294,6 @@ public class LinkageHazardDetector {
      */
     private void checkMethodCallTransitive(String targetClassName, String methodSignature, 
                                           Set<String> visited, int depth, List<String> callChain) {
-        // Limit depth to prevent excessive recursion
-        if (depth > MAX_TRANSITIVE_DEPTH) {
-            return;
-        }
-        
         String fullMethodSig = targetClassName + "." + methodSignature;
         
         // Prevent infinite loops in cyclic call graphs
@@ -319,11 +302,17 @@ public class LinkageHazardDetector {
         }
         visited.add(fullMethodSig);
         
+        // Stop traversal at standard library classes to limit scope
+        if (isStandardLibraryClass(targetClassName)) {
+            return;
+        }
+        
         // Initialize call chain if needed
         if (callChain == null) {
             callChain = new ArrayList<>();
         }
-        callChain.add(fullMethodSig);
+        List<String> currentChain = new ArrayList<>(callChain);
+        currentChain.add(fullMethodSig);
         
         // Check if the target class has duplicates
         Map<String, Set<String>> methodsByLocation = classMethodSets.get(targetClassName);
@@ -356,23 +345,40 @@ public class LinkageHazardDetector {
                     
                     if (depth > 0) {
                         System.err.println("  Detection depth: " + depth + " (transitive call)");
-                        System.err.println("  Call chain: " + String.join(" -> ", callChain));
+                        System.err.println("  Call chain: " + String.join(" -> ", currentChain));
+                    } else {
+                        System.err.println("  Detection depth: 0 (direct call)");
                     }
                 }
             }
             
             // If the method exists in at least one version, analyze its transitive calls
-            // We need to check what this method calls in the versions where it exists
+            // Check all variants to ensure we don't miss hazards
             if (!presentLocations.isEmpty()) {
-                analyzeTransitiveCalls(presentLocations.get(0), targetClassName, methodSignature, 
-                                     visited, depth, new ArrayList<>(callChain));
+                for (String jarPath : presentLocations) {
+                    analyzeTransitiveCalls(jarPath, targetClassName, methodSignature, 
+                                         visited, depth + 1, currentChain);
+                }
             }
         } else {
             // Even if not a duplicate, analyze transitive calls from this method
             // This helps catch cases where a non-duplicate calls a duplicate deeper in the tree
             analyzeTransitiveCallsForNonDuplicate(targetClassName, methodSignature, 
-                                                 visited, depth, new ArrayList<>(callChain));
+                                                 visited, depth + 1, currentChain);
         }
+    }
+    
+    /**
+     * Check if a class is part of the standard library.
+     * Standard library classes are unlikely to have linkage issues and traversing them
+     * would be expensive and unnecessary.
+     */
+    private boolean isStandardLibraryClass(String className) {
+        return className.startsWith("java.") || 
+               className.startsWith("javax.") ||
+               className.startsWith("sun.") ||
+               className.startsWith("com.sun.") ||
+               className.startsWith("jdk.");
     }
     
     /**
@@ -385,8 +391,9 @@ public class LinkageHazardDetector {
         
         if (calledMethods != null) {
             for (MethodInvocation invocation : calledMethods) {
+                // Pass a fresh copy of the call chain for each invocation
                 checkMethodCallTransitive(invocation.className, invocation.methodSignature,
-                                        visited, depth + 1, callChain);
+                                        visited, depth, new ArrayList<>(callChain));
             }
         }
     }
@@ -402,16 +409,26 @@ public class LinkageHazardDetector {
         
         if (calledMethods != null) {
             for (MethodInvocation invocation : calledMethods) {
+                // Pass a fresh copy of the call chain for each invocation
                 checkMethodCallTransitive(invocation.className, invocation.methodSignature,
-                                        visited, depth + 1, callChain);
+                                        visited, depth, new ArrayList<>(callChain));
             }
         }
     }
     
     /**
      * Extract method calls from a specific method in a JAR file.
+     * Results are cached to avoid repeatedly parsing the same methods.
      */
     private Set<MethodInvocation> extractMethodCalls(String jarPath, String className, String methodSig) {
+        // Create cache key
+        String cacheKey = jarPath + "|" + className + "|" + methodSig;
+        
+        // Check cache first
+        Set<MethodInvocation> cached = methodCallCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
         Set<MethodInvocation> methodCalls = new HashSet<>();
         
         try (JarFile jar = new JarFile(jarPath)) {
@@ -449,6 +466,9 @@ public class LinkageHazardDetector {
             System.err.println("[Shady] Warning: Could not analyze transitive calls in " + 
                              className + "." + methodSig + " from " + jarPath + ": " + e.getMessage());
         }
+        
+        // Cache the result (even if empty)
+        methodCallCache.put(cacheKey, methodCalls);
         
         return methodCalls;
     }
