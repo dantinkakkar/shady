@@ -111,6 +111,35 @@ The agent uses:
 - **Intelligent depth traversal** that stops at JDK classes (java.*, javax.*, etc.) to limit scope
 - **Complete method analysis** including private methods to catch all potential linkage issues
 
+## Limitations
+
+### Dynamic Dispatch (Polymorphism)
+
+Shady performs **static analysis** of bytecode and cannot fully handle dynamic dispatch scenarios where method calls are resolved at runtime based on the actual object type rather than the declared type. This includes:
+
+- **Interface method calls** - When a method is called on an interface reference, the actual implementation depends on the concrete class at runtime
+- **Virtual method calls** - Method calls on superclass references that are overridden in subclasses
+- **Abstract method implementations** - Different concrete implementations of abstract methods
+
+**Example scenario not fully detected:**
+```java
+// Interface with multiple implementations in different JARs
+interface Encoder {
+    void encode();
+}
+
+// v1.jar has: class EncoderV1 implements Encoder { void encode() { helperA(); } }
+// v2.jar has: class EncoderV2 implements Encoder { void encode() { helperB(); } }
+
+// Application code
+Encoder encoder = getEncoder(); // Returns EncoderV1 or EncoderV2
+encoder.encode(); // Shady sees call to Encoder.encode() but can't determine which implementation
+```
+
+In this case, Shady detects issues with direct method calls but may miss transitive issues where different implementations call different helper methods.
+
+**Workaround:** Ensure your dependency management explicitly pins the versions of all transitive dependencies to avoid having multiple implementations on the classpath.
+
 ## CI/CD
 
 The project includes GitHub Actions CI that:

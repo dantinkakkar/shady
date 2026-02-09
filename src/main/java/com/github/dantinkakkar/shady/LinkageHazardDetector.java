@@ -18,6 +18,16 @@ import java.util.jar.JarFile;
 /**
  * Detects linkage hazards by scanning the classpath for duplicate classes
  * and analyzing bytecode for method calls that might not exist in all versions.
+ * 
+ * <p>This detector performs static analysis of bytecode to identify potential
+ * NoSuchMethodError scenarios before they occur at runtime. It builds a call graph
+ * and recursively analyzes method invocations to detect transitive hazards.</p>
+ * 
+ * <p><strong>Limitation:</strong> This is a static analysis tool and cannot fully handle
+ * dynamic dispatch (polymorphism). Method calls on interfaces or abstract classes are
+ * tracked based on the declared type in bytecode, not the actual runtime type. This means
+ * some transitive hazards involving different implementations of the same interface may
+ * not be detected.</p>
  */
 public class LinkageHazardDetector {
     
