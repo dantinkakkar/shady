@@ -30,6 +30,12 @@ public class LinkageHazardDetector {
     // Track warnings we've already issued to avoid spam
     private final Set<String> issuedWarnings = ConcurrentHashMap.newKeySet();
     
+    // Call graph: Maps method (className.methodName+descriptor) to the methods it calls
+    private final Map<String, Set<MethodInvocation>> callGraph = new ConcurrentHashMap<>();
+    
+    // Map of JAR path to all class names contained within (for analysis)
+    private final Map<String, Set<String>> jarContents = new ConcurrentHashMap<>();
+    
     /**
      * Represents a location where a class is found.
      */
@@ -45,6 +51,42 @@ public class LinkageHazardDetector {
         @Override
         public String toString() {
             return jarPath + "!" + className;
+        }
+    }
+    
+    /**
+     * Represents a method invocation in the call graph.
+     */
+    private static class MethodInvocation {
+        final String className;
+        final String methodSignature;
+        
+        MethodInvocation(String className, String methodSignature) {
+            this.className = className;
+            this.methodSignature = methodSignature;
+        }
+        
+        String getFullSignature() {
+            return className + "." + methodSignature;
+        }
+        
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            MethodInvocation that = (MethodInvocation) o;
+            return Objects.equals(className, that.className) &&
+                   Objects.equals(methodSignature, that.methodSignature);
+        }
+        
+        @Override
+        public int hashCode() {
+            return Objects.hash(className, methodSignature);
+        }
+        
+        @Override
+        public String toString() {
+            return className + "." + methodSignature;
         }
     }
     
@@ -99,6 +141,9 @@ public class LinkageHazardDetector {
      */
     private void scanJar(File jarFile, Map<String, List<String>> classLocations) {
         try (JarFile jar = new JarFile(jarFile)) {
+            Set<String> classesInJar = new HashSet<>();
+            String jarPath = jarFile.getAbsolutePath();
+            
             Enumeration<JarEntry> entries = jar.entries();
             while (entries.hasMoreElements()) {
                 JarEntry entry = entries.nextElement();
@@ -114,10 +159,14 @@ public class LinkageHazardDetector {
                         String className = name.replace("/", ".").substring(0, name.length() - 6);
                         
                         classLocations.computeIfAbsent(className, k -> new ArrayList<>())
-                                .add(jarFile.getAbsolutePath());
+                                .add(jarPath);
+                        classesInJar.add(className);
                     }
                 }
             }
+            
+            // Store jar contents for later analysis
+            jarContents.put(jarPath, classesInJar);
         } catch (IOException e) {
             System.err.println("[Shady] Error scanning JAR " + jarFile + ": " + e.getMessage());
         }
@@ -203,11 +252,23 @@ public class LinkageHazardDetector {
                 @Override
                 public MethodVisitor visitMethod(int access, String name, String descriptor,
                                                   String signature, String[] exceptions) {
+                    final String currentMethodSig = currentClassName + "." + name + descriptor;
+                    
                     return new MethodVisitor(Opcodes.ASM9) {
                         @Override
                         public void visitMethodInsn(int opcode, String owner, String name,
                                                      String descriptor, boolean isInterface) {
-                            checkMethodCall(owner.replace("/", "."), name + descriptor);
+                            String targetClassName = owner.replace("/", ".");
+                            String targetMethodSig = name + descriptor;
+                            
+                            // Build call graph
+                            MethodInvocation invocation = new MethodInvocation(targetClassName, targetMethodSig);
+                            callGraph.computeIfAbsent(currentMethodSig, k -> ConcurrentHashMap.newKeySet())
+                                    .add(invocation);
+                            
+                            // Check for direct hazards
+                            checkMethodCall(targetClassName, targetMethodSig);
+                            
                             super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
                         }
                     };
@@ -221,9 +282,42 @@ public class LinkageHazardDetector {
     }
     
     /**
-     * Check if a method call might be hazardous.
+     * Check if a method call might be hazardous (direct check only).
      */
     private void checkMethodCall(String targetClassName, String methodSignature) {
+        checkMethodCallTransitive(targetClassName, methodSignature, new HashSet<>(), 0, null);
+    }
+    
+    /**
+     * Check if a method call might be hazardous, including transitive calls.
+     * 
+     * @param targetClassName the class containing the method
+     * @param methodSignature the method signature being called
+     * @param visited set of already visited methods to prevent cycles
+     * @param depth current depth in the call chain
+     * @param callChain the chain of calls that led to this point (for debugging)
+     */
+    private void checkMethodCallTransitive(String targetClassName, String methodSignature, 
+                                          Set<String> visited, int depth, List<String> callChain) {
+        // Limit depth to prevent excessive recursion
+        if (depth > 5) {
+            return;
+        }
+        
+        String fullMethodSig = targetClassName + "." + methodSignature;
+        
+        // Prevent infinite loops in cyclic call graphs
+        if (visited.contains(fullMethodSig)) {
+            return;
+        }
+        visited.add(fullMethodSig);
+        
+        // Initialize call chain if needed
+        if (callChain == null) {
+            callChain = new ArrayList<>();
+        }
+        callChain.add(fullMethodSig);
+        
         // Check if the target class has duplicates
         Map<String, Set<String>> methodsByLocation = classMethodSets.get(targetClassName);
         
@@ -231,16 +325,19 @@ public class LinkageHazardDetector {
             // Check if the method exists in all versions
             boolean missingInSome = false;
             List<String> missingLocations = new ArrayList<>();
+            List<String> presentLocations = new ArrayList<>();
             
             for (Map.Entry<String, Set<String>> entry : methodsByLocation.entrySet()) {
                 if (!entry.getValue().contains(methodSignature)) {
                     missingInSome = true;
                     missingLocations.add(entry.getKey());
+                } else {
+                    presentLocations.add(entry.getKey());
                 }
             }
             
             if (missingInSome) {
-                String warningKey = targetClassName + "." + methodSignature;
+                String warningKey = fullMethodSig;
                 
                 // Only warn once per method
                 if (issuedWarnings.add(warningKey)) {
@@ -248,9 +345,103 @@ public class LinkageHazardDetector {
                     System.err.println("  Class: " + targetClassName);
                     System.err.println("  Method: " + methodSignature);
                     System.err.println("  Method is missing in: " + missingLocations);
+                    System.err.println("  Method is present in: " + presentLocations);
+                    
+                    if (depth > 0) {
+                        System.err.println("  Detection depth: " + depth + " (transitive call)");
+                        System.err.println("  Call chain: " + String.join(" -> ", callChain));
+                    }
                 }
             }
+            
+            // If the method exists in at least one version, analyze its transitive calls
+            // We need to check what this method calls in the versions where it exists
+            if (!presentLocations.isEmpty()) {
+                analyzeTransitiveCalls(presentLocations.get(0), targetClassName, methodSignature, 
+                                     visited, depth, new ArrayList<>(callChain));
+            }
+        } else {
+            // Even if not a duplicate, analyze transitive calls from this method
+            // This helps catch cases where a non-duplicate calls a duplicate deeper in the tree
+            analyzeTransitiveCallsForNonDuplicate(targetClassName, methodSignature, 
+                                                 visited, depth, new ArrayList<>(callChain));
         }
+    }
+    
+    /**
+     * Analyze transitive calls from a method in a specific JAR.
+     */
+    private void analyzeTransitiveCalls(String jarPath, String className, String methodSig,
+                                       Set<String> visited, int depth, List<String> callChain) {
+        // Extract method calls from this specific method in this JAR
+        Set<MethodInvocation> calledMethods = extractMethodCalls(jarPath, className, methodSig);
+        
+        if (calledMethods != null) {
+            for (MethodInvocation invocation : calledMethods) {
+                checkMethodCallTransitive(invocation.className, invocation.methodSignature,
+                                        visited, depth + 1, callChain);
+            }
+        }
+    }
+    
+    /**
+     * Analyze transitive calls for non-duplicate classes using the call graph.
+     */
+    private void analyzeTransitiveCallsForNonDuplicate(String className, String methodSig,
+                                                       Set<String> visited, int depth, 
+                                                       List<String> callChain) {
+        String fullMethodSig = className + "." + methodSig;
+        Set<MethodInvocation> calledMethods = callGraph.get(fullMethodSig);
+        
+        if (calledMethods != null) {
+            for (MethodInvocation invocation : calledMethods) {
+                checkMethodCallTransitive(invocation.className, invocation.methodSignature,
+                                        visited, depth + 1, callChain);
+            }
+        }
+    }
+    
+    /**
+     * Extract method calls from a specific method in a JAR file.
+     */
+    private Set<MethodInvocation> extractMethodCalls(String jarPath, String className, String methodSig) {
+        Set<MethodInvocation> methodCalls = new HashSet<>();
+        
+        try (JarFile jar = new JarFile(jarPath)) {
+            String entryName = className.replace(".", "/") + ".class";
+            JarEntry entry = jar.getJarEntry(entryName);
+            
+            if (entry != null) {
+                try (InputStream is = jar.getInputStream(entry)) {
+                    ClassReader reader = new ClassReader(is);
+                    
+                    reader.accept(new ClassVisitor(Opcodes.ASM9) {
+                        @Override
+                        public MethodVisitor visitMethod(int access, String name, String descriptor,
+                                                          String signature, String[] exceptions) {
+                            // Check if this is the method we're interested in
+                            if ((name + descriptor).equals(methodSig)) {
+                                return new MethodVisitor(Opcodes.ASM9) {
+                                    @Override
+                                    public void visitMethodInsn(int opcode, String owner, String name,
+                                                                 String descriptor, boolean isInterface) {
+                                        String targetClassName = owner.replace("/", ".");
+                                        String targetMethodSig = name + descriptor;
+                                        methodCalls.add(new MethodInvocation(targetClassName, targetMethodSig));
+                                        super.visitMethodInsn(opcode, owner, name, descriptor, isInterface);
+                                    }
+                                };
+                            }
+                            return null;
+                        }
+                    }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+                }
+            }
+        } catch (IOException e) {
+            // Ignore errors - just return empty set
+        }
+        
+        return methodCalls;
     }
     
     /**
