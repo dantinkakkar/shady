@@ -41,6 +41,11 @@ public class LinkageHazardDetector {
     // Map of class name to set of public/protected methods for each location
     private final Map<String, Map<String, Set<String>>> classMethodSets = new ConcurrentHashMap<>();
     
+    // NEW METHODOLOGY: Complete method registry for ALL classes on classpath
+    // Maps "ClassName.methodName+descriptor" -> Set of JAR paths where this method exists
+    // This allows us to check if ANY method call references a method that doesn't exist
+    private final Map<String, Set<String>> completeMethodRegistry = new ConcurrentHashMap<>();
+    
     // Track warnings we've already issued to avoid spam
     private final Set<String> issuedWarnings = ConcurrentHashMap.newKeySet();
     
@@ -189,7 +194,13 @@ public class LinkageHazardDetector {
             System.out.println("[Shady] No duplicate classes found on classpath");
         }
         
-        // CRITICAL: Proactively analyze ALL classes to detect hazards
+        // CRITICAL STEP 1: Build complete method registry for ALL classes
+        // This is the foundation of the new methodology: we need to know what methods exist
+        // in ALL classes (not just duplicates) so we can check if method calls are valid
+        System.out.println("[Shady] Building complete method registry for all classes...");
+        buildCompleteMethodRegistry(classLocations);
+        
+        // CRITICAL STEP 2: Proactively analyze ALL classes to detect hazards
         // Since JVM loads classes lazily, we can't rely on ClassFileTransformer alone
         System.out.println("[Shady] Proactively analyzing all classes from classpath...");
         analyzeAllClassesFromClasspath(classLocations);
@@ -431,11 +442,49 @@ public class LinkageHazardDetector {
             return;
         }
         
-        // Check if the target class has duplicates
+        // NEW METHODOLOGY: Check if the method exists in the complete method registry
+        // This is the KEY CHANGE - we check EVERY method call against ALL available methods,
+        // not just methods in duplicate classes
+        // 
+        // IMPORTANT: Only check non-JDK classes. For JDK classes, we trust they're internally consistent.
+        String fullMethodKey = targetClassName + "." + methodSignature;
+        
+        if (!isJDKClass(targetClassName)) {
+            Set<String> methodLocations = completeMethodRegistry.get(fullMethodKey);
+            
+            if (methodLocations == null || methodLocations.isEmpty()) {
+                // Method doesn't exist ANYWHERE on the classpath!
+                // This is a critical linkage hazard
+                String warningKey = "missing_method_" + fullMethodKey;
+                
+                if (issuedWarnings.add(warningKey)) {
+                    System.err.println("[Shady] WARNING: Linkage hazard detected!");
+                    System.err.println("  Class: " + targetClassName);
+                    System.err.println("  Method: " + methodSignature);
+                    System.err.println("  ERROR: Method does not exist in ANY version on classpath!");
+                    
+                    // Report call site information
+                    if (callerSig != null) {
+                        System.err.println("  Called from: " + callerSig);
+                    }
+                    
+                    if (depth > 0) {
+                        System.err.println("  Detection depth: " + depth + " (transitive call)");
+                        System.err.println("  Call chain: " + String.join(" -> ", currentChain));
+                    } else {
+                        System.err.println("  Detection depth: 0 (direct call)");
+                    }
+                }
+                // Can't analyze further if method doesn't exist
+                return;
+            }
+        }
+        
+        // Now check if this is a duplicate class with different method sets
         Map<String, Set<String>> methodsByLocation = classMethodSets.get(targetClassName);
         
         if (methodsByLocation != null && methodsByLocation.size() > 1) {
-            // Check if the method exists in all versions
+            // Check if the method exists in all versions (duplicate class scenario)
             boolean missingInSome = false;
             List<String> missingLocations = new ArrayList<>();
             List<String> presentLocations = new ArrayList<>();
@@ -485,11 +534,16 @@ public class LinkageHazardDetector {
                                          variantVisited, depth + 1, currentChain, fullMethodSig);
                 }
             }
-        } else {
-            // Even if not a duplicate, analyze transitive calls from this method
-            // This helps catch cases where a non-duplicate calls a duplicate deeper in the tree
-            analyzeTransitiveCallsForNonDuplicate(targetClassName, methodSignature, 
-                                                 visited, depth + 1, currentChain, fullMethodSig);
+        } else if (!isJDKClass(targetClassName)) {
+            // Method exists and either not a duplicate or same in all versions
+            // Analyze transitive calls from this method
+            // For non-JDK classes, look up where the method exists and analyze transitive calls
+            Set<String> methodLocations = completeMethodRegistry.get(fullMethodKey);
+            if (methodLocations != null && !methodLocations.isEmpty()) {
+                String anyJarPath = methodLocations.iterator().next();
+                analyzeTransitiveCalls(anyJarPath, targetClassName, methodSignature, 
+                                     visited, depth + 1, currentChain, fullMethodSig);
+            }
         }
     }
     
@@ -647,6 +701,50 @@ public class LinkageHazardDetector {
         methodCallCache.put(cacheKey, methodCalls);
         
         return methodCalls;
+    }
+    
+    /**
+     * Build complete method registry for ALL classes on classpath.
+     * NEW METHODOLOGY: We need to know ALL methods that exist in ALL classes
+     * so we can check if any method call references a method that doesn't exist.
+     * 
+     * This is the key fix - previously we only checked duplicate classes, but now
+     * we check EVERY method call in EVERY non-standard-library class.
+     * 
+     * @param classLocations map of class name to list of JAR paths where it's found
+     */
+    private void buildCompleteMethodRegistry(Map<String, List<String>> classLocations) {
+        int totalClasses = 0;
+        int processedClasses = 0;
+        
+        for (Map.Entry<String, List<String>> entry : classLocations.entrySet()) {
+            String className = entry.getKey();
+            List<String> jars = entry.getValue();
+            
+            // Skip standard library classes
+            if (isStandardLibraryClass(className)) {
+                continue;
+            }
+            
+            totalClasses++;
+            
+            // Extract methods from ALL versions of this class
+            for (String jarPath : jars) {
+                Set<String> methods = extractAllMethods(jarPath, className);
+                if (methods != null && !methods.isEmpty()) {
+                    // Register each method: ClassName.methodName+descriptor -> Set of JAR paths
+                    for (String methodSig : methods) {
+                        String fullMethodSig = className + "." + methodSig;
+                        completeMethodRegistry.computeIfAbsent(fullMethodSig, k -> ConcurrentHashMap.newKeySet())
+                                .add(jarPath);
+                    }
+                    processedClasses++;
+                }
+            }
+        }
+        
+        System.out.println("[Shady] Built method registry with " + completeMethodRegistry.size() + 
+                          " methods from " + processedClasses + " classes");
     }
     
     /**
