@@ -50,6 +50,10 @@ public class LinkageHazardDetector {
     // Cache for extracted method calls: (jarPath, className, methodSig) -> Set<MethodInvocation>
     private final Map<MethodCallCacheKey, Set<MethodInvocation>> methodCallCache = new ConcurrentHashMap<>();
     
+    // Map of all classes on classpath: className -> List of jar paths
+    // Used to detect when a method call references a class that doesn't exist at all
+    private final Map<String, List<String>> allClassLocations = new ConcurrentHashMap<>();
+    
     /**
      * Represents a location where a class is found.
      */
@@ -157,6 +161,9 @@ public class LinkageHazardDetector {
                 scanJar(file, classLocations);
             }
         }
+        
+        // Store all class locations for later reference
+        allClassLocations.putAll(classLocations);
         
         // Find duplicates and analyze them
         for (Map.Entry<String, List<String>> entry : classLocations.entrySet()) {
@@ -394,6 +401,36 @@ public class LinkageHazardDetector {
         List<String> currentChain = new ArrayList<>(callChain);
         currentChain.add(fullMethodSig);
         
+        // First, check if the target class even exists on the classpath
+        // Note: Inner classes (containing $) are not in allClassLocations because we skip them during scanning
+        // but they exist as part of their parent class
+        boolean isInnerClass = targetClassName.contains("$");
+        if (!allClassLocations.containsKey(targetClassName) && !isJDKClass(targetClassName) && !isInnerClass) {
+            // Class doesn't exist on classpath - this is a critical hazard
+            String warningKey = "missing_class_" + targetClassName;
+            
+            if (issuedWarnings.add(warningKey)) {
+                System.err.println("[Shady] WARNING: Linkage hazard detected!");
+                System.err.println("  Class: " + targetClassName);
+                System.err.println("  Method: " + methodSignature);
+                System.err.println("  ERROR: Class does not exist on classpath!");
+                
+                // Report call site information
+                if (callerSig != null) {
+                    System.err.println("  Called from: " + callerSig);
+                }
+                
+                if (depth > 0) {
+                    System.err.println("  Detection depth: " + depth + " (transitive call)");
+                    System.err.println("  Call chain: " + String.join(" -> ", currentChain));
+                } else {
+                    System.err.println("  Detection depth: 0 (direct call)");
+                }
+            }
+            // Can't analyze further if class doesn't exist
+            return;
+        }
+        
         // Check if the target class has duplicates
         Map<String, Set<String>> methodsByLocation = classMethodSets.get(targetClassName);
         
@@ -505,6 +542,19 @@ public class LinkageHazardDetector {
         }
         
         return false;
+    }
+    
+    /**
+     * Check if a class is part of the JDK (any java.*, javax.*, sun.*, jdk.* class).
+     * This is a broader check than isStandardLibraryClass and is used to determine
+     * if a class should exist in our classpath scan or not.
+     */
+    private boolean isJDKClass(String className) {
+        return className.startsWith("java.") ||
+               className.startsWith("javax.") ||
+               className.startsWith("sun.") ||
+               className.startsWith("com.sun.") ||
+               className.startsWith("jdk.");
     }
     
     /**
