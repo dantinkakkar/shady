@@ -46,6 +46,29 @@
             <version>${junit.version}</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Real dependencies for integration testing of linkage hazard detection -->
+        <!-- Spring Boot brings netty-codec 4.1.119.Final transitively -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+            <version>3.4.4</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Explicitly add netty-codec 4.1.125.Final to create a version conflict -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec</artifactId>
+            <version>4.1.125.Final</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Also add netty-codec-http which depends on netty-codec -->
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+            <version>4.1.125.Final</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
