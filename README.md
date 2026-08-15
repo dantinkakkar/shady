@@ -17,7 +17,8 @@ netty-codec      4.1.119  --provides-> no such overload
 ```
 
 That graph throws `NoSuchMethodError` only when the affected decompression path executes. Shady
-reports the exact caller, missing method descriptor, and effective target artifact at startup.
+reports the expected call in Java-readable form, the effective runtime artifact, and any same-name
+methods that are actually available there.
 
 It also retains duplicate-FQN reporting, follows indexed superclass and interface methods, includes
 inner classes, and scans libraries nested under `BOOT-INF/lib` in Spring Boot executable JARs.
@@ -35,11 +36,13 @@ Example warning:
 
 ```text
 [Shady] WARNING: Linkage hazard detected!
-  Class: io.netty.handler.codec.compression.ZlibCodecFactory
-  Method: newZlibDecoder(Lio/netty/handler/codec/compression/ZlibWrapper;I)Lio/netty/handler/codec/compression/ZlibDecoder;
-  Called from: io.netty.handler.codec.http.HttpContentDecompressor.newContentDecoder(Ljava/lang/String;)Lio/netty/channel/embedded/EmbeddedChannel;
-  Resolved target: /path/to/netty-codec-4.1.119.Final.jar
-  ERROR: Method is absent from the effective target definition
+  Caller:   handmade.app.Consumer.main(java.lang.String[]): void
+  Expected: handmade.lib.Parser.decode(java.lang.String, int): java.lang.String
+  Actual:   no exact method in handmade.lib.Parser
+  From:     /path/to/handmade-library-v1.jar
+  Available same-name methods:
+    - handmade.lib.Parser.decode(java.lang.String): java.lang.String
+  Impact:   this call will throw NoSuchMethodError
 ```
 
 ## Tests
@@ -50,9 +53,10 @@ mvn test
 
 The regression suite resolves the real Spring Boot 3.4.4 dependency graph with
 `netty-codec-http:4.1.125.Final` and asserts that Maven selected `netty-codec:4.1.119.Final`. It then
-requires Shady to report that exact caller/target mismatch. Synthetic tests cover the no-duplicate
-case, a compatible target, inherited methods, inner classes, duplicate reporting, and Spring Boot
-nested libraries.
+requires Shady to report that exact caller/target mismatch. A black-box test also builds a consumer
+and two tiny library JARs, launches the packaged agent, and verifies both the broken v1 runtime and
+the compatible v2 control. Synthetic tests cover inherited methods, inner classes, duplicate
+reporting, and Spring Boot nested libraries.
 
 ## Scope
 

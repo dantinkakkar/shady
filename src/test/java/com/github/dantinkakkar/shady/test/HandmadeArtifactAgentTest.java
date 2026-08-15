@@ -34,11 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class HandmadeArtifactAgentTest {
 
-    private static final String TARGET = "handmade.lib.Parser";
-    private static final String METHOD =
-            "decode(Ljava/lang/String;I)Ljava/lang/String;";
     private static final String CALLER =
-            "handmade.app.Consumer.main([Ljava/lang/String;)V";
+            "handmade.app.Consumer.main(java.lang.String[]): void";
+    private static final String EXPECTED =
+            "handmade.lib.Parser.decode(java.lang.String, int): java.lang.String";
+    private static final String AVAILABLE =
+            "handmade.lib.Parser.decode(java.lang.String): java.lang.String";
 
     @TempDir
     Path tempDir;
@@ -73,11 +74,14 @@ class HandmadeArtifactAgentTest {
 
         assertTrue(run.exitCode != 0, "The incompatible runtime should fail linkage");
         assertTrue(run.output.contains("Indexed 2 effective classes and found 0 duplicate FQNs"));
-        assertTrue(run.output.contains("Class: " + TARGET));
-        assertTrue(run.output.contains("Method: " + METHOD));
-        assertTrue(run.output.contains("Called from: " + CALLER));
-        assertTrue(run.output.contains("Resolved target: "
+        assertTrue(run.output.contains("Caller:   " + CALLER));
+        assertTrue(run.output.contains("Expected: " + EXPECTED));
+        assertTrue(run.output.contains("Actual:   no exact method in handmade.lib.Parser"));
+        assertTrue(run.output.contains("From:     "
                 + libraryV1Jar.toAbsolutePath().normalize()));
+        assertTrue(run.output.contains("Available same-name methods:"));
+        assertTrue(run.output.contains("    - " + AVAILABLE));
+        assertTrue(run.output.contains("Impact:   this call will throw NoSuchMethodError"));
         assertTrue(run.output.contains("java.lang.NoSuchMethodError"));
 
         int warning = run.output.indexOf("[Shady] WARNING: Linkage hazard detected!");
@@ -95,7 +99,7 @@ class HandmadeArtifactAgentTest {
         assertTrue(run.output.contains("Indexed 2 effective classes and found 0 duplicate FQNs"));
         assertTrue(run.output.contains("Linkage analysis complete: 0 hazard(s)"));
         assertTrue(run.output.contains("RESULT=payload"));
-        assertFalse(run.output.contains("Class: " + TARGET));
+        assertFalse(run.output.contains("Expected: " + EXPECTED));
         assertFalse(run.output.contains("Linkage hazard detected"));
     }
 

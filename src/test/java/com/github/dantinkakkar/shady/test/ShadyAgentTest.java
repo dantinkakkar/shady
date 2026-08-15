@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -45,6 +46,7 @@ class ShadyAgentTest {
                 "The real failure does not require a duplicate class");
         LinkageHazard hazard = findHazard(detector, TARGET, MISSING_METHOD, CALLER);
         assertEquals(targetJar.toAbsolutePath().normalize().toString(), hazard.getTargetLocation());
+        assertEquals(List.of("newApi()V"), hazard.getAvailableMethodSignatures());
     }
 
     @Test
@@ -191,7 +193,7 @@ class ShadyAgentTest {
     }
 
     private static byte[] targetWithoutNewApi(String internalName) {
-        return classWithStaticMethod(internalName, "oldApi", "()V");
+        return classWithStaticMethod(internalName, "newApi", "()V");
     }
 
     private static byte[] targetWithNewApi(String internalName) {
