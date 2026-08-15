@@ -1,101 +1,69 @@
 # shady
 
-Catch lazy linkage issues from shaded classes within dependency manifests in your Java application, at runtime.
+Catch latent JVM linkage failures before the broken code path runs.
 
-## What is Shady?
+## What Shady detects
 
-Shady is a Java agent that detects latent JVM linkage hazards at startup. It:
+Shady is a Java agent that indexes the effective runtime classpath, scans bytecode call sites, and
+warns when the class the JVM will resolve does not contain the method a caller was compiled against.
+It analyzes classes at startup as well as classes presented to the instrumentation transformer.
 
-1. **Enumerates runtime classpath JARs** - Scans all JARs on the classpath
-2. **Finds duplicate FQNs** - Identifies classes that exist in multiple JARs (common with shading)
-3. **Diffs method sets** - Compares public/protected methods across different versions of the same class
-4. **Scans bytecode** - Uses ASM to analyze loaded bytecode for method call sites
-5. **Warns about hazards** - Emits warnings when code calls methods that don't exist in all versions (without crashing)
+This is intentionally broader than duplicate-class detection. A common failure has two different
+artifacts that are each present only once but are binary-incompatible with one another:
 
-## Why do I need this?
+```text
+netty-codec-http 4.1.125  --calls-->  ZlibCodecFactory.newZlibDecoder(ZlibWrapper, int)
+netty-codec      4.1.119  --provides-> no such overload
+```
 
-When dependencies shade classes or when you have version conflicts, you can end up with multiple versions of the same class on your classpath. Which version gets loaded is often non-deterministic. If code tries to call a method that exists in one version but not another, you'll get a `NoSuchMethodError` at runtime - but only if that code path is executed.
+That graph throws `NoSuchMethodError` only when the affected decompression path executes. Shady
+reports the expected call in Java-readable form, the effective runtime artifact, and any same-name
+methods that are actually available there.
 
-Shady detects these issues proactively at startup, before they cause production failures.
+It also retains duplicate-FQN reporting, follows indexed superclass and interface methods, includes
+inner classes, and scans libraries nested under `BOOT-INF/lib` in Spring Boot executable JARs.
 
-## Quick Start
+## Build and use
 
-### Build
+Requirements: Java 11+ and Maven 3.6+.
 
 ```bash
 mvn clean package
+java -javaagent:target/shady-1.0-SNAPSHOT.jar -jar your-application.jar
 ```
 
-This creates `target/shady-1.0-SNAPSHOT.jar` with the agent.
+Example warning:
 
-### Usage
-
-Run your Java application with the agent:
-
-```bash
-java -javaagent:shady-1.0-SNAPSHOT.jar -jar your-application.jar
-```
-
-### Example Output
-
-When Shady detects a linkage hazard:
-
-```
-[Shady] Java agent started - detecting linkage hazards...
-[Shady] Scanning classpath for duplicate classes...
-[Shady] Found 2 duplicate classes on classpath
+```text
 [Shady] WARNING: Linkage hazard detected!
-  Class: com.example.duplicate.DuplicateClass
-  Method: methodB()V
-  Method is missing in: [/path/to/library-v2.jar]
+  Caller:   handmade.app.Consumer.main(java.lang.String[]): void
+  Expected: handmade.lib.Parser.decode(java.lang.String, int): java.lang.String
+  Actual:   no exact method in handmade.lib.Parser
+  From:     /path/to/handmade-library-v1.jar
+  Available same-name methods:
+    - handmade.lib.Parser.decode(java.lang.String): java.lang.String
+  Impact:   this call will throw NoSuchMethodError
 ```
 
-## Testing
-
-The project includes comprehensive JUnit 5 tests that:
-
-- Create test JARs with duplicate classes but different methods
-- Verify the agent detects the duplicates
-- Verify warnings are issued for missing methods
-- Verify no warnings for methods present in all versions
-
-Run tests:
+## Tests
 
 ```bash
 mvn test
 ```
 
-The tests automatically run with the `-javaagent` flag configured in Maven Surefire.
+The regression suite resolves the real Spring Boot 3.4.4 dependency graph with
+`netty-codec-http:4.1.125.Final` and asserts that Maven selected `netty-codec:4.1.119.Final`. It then
+requires Shady to report that exact caller/target mismatch. A black-box test also builds a consumer
+and two tiny library JARs, launches the packaged agent, and verifies both the broken v1 runtime and
+the compatible v2 control. Synthetic tests cover inherited methods, inner classes, duplicate
+reporting, and Spring Boot nested libraries.
 
-## How It Works
+## Scope
 
-1. **Startup**: The agent's `premain` method is called when the JVM starts
-2. **Classpath Scanning**: All JAR files on the classpath are enumerated and scanned for `.class` files
-3. **Duplicate Detection**: Classes appearing in multiple JARs are identified
-4. **Method Extraction**: For each duplicate, public/protected methods are extracted using ASM
-5. **Bytecode Analysis**: As classes are loaded, their bytecode is analyzed for method calls
-6. **Hazard Detection**: If a call site invokes a method missing in any version, a warning is emitted
-
-The agent uses:
-- **Java Instrumentation API** for bytecode transformation hooks
-- **ASM library** for bytecode analysis (shaded to avoid conflicts)
-- **Concurrent data structures** for thread-safe tracking
-
-## CI/CD
-
-The project includes GitHub Actions CI that:
-- Builds the agent JAR
-- Runs all tests with the `-javaagent` flag
-- Validates the agent works correctly
-
-See `.github/workflows/ci.yml` for details.
-
-## Requirements
-
-- Java 11+
-- Maven 3.6+
+Shady currently targets missing-method linkage. If a referenced target class is absent from the
+indexed classpath, it is left alone because a custom class loader or optional dependency may supply
+it. Multi-release JAR entries under `META-INF/versions` are not yet modeled.
 
 ## License
 
-Apache License 2.0 - See LICENSE file for details.
-
+Apache License 2.0 — see `LICENSE`.

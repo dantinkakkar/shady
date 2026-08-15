@@ -10,15 +10,30 @@
     <packaging>jar</packaging>
 
     <name>Shady - JVM Linkage Hazard Detection</name>
-    <description>A Java agent that detects latent JVM linkage hazards from shaded classes</description>
+    <description>A Java agent that detects latent JVM method linkage hazards</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>11</maven.compiler.source>
         <maven.compiler.target>11</maven.compiler.target>
         <asm.version>9.6</asm.version>
-        <junit.version>5.10.1</junit.version>
+        <junit.version>5.11.4</junit.version>
+        <spring-boot.version>3.4.4</spring-boot.version>
+        <netty-codec-http.version>4.1.125.Final</netty-codec-http.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Reproduce the dependency management involved in the original mismatch. -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- ASM for bytecode analysis -->
@@ -44,6 +59,23 @@
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-engine</artifactId>
             <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          Regression fixture: Boot 3.4.4 manages netty-codec at 4.1.119.Final, while the
+          direct override leaves netty-codec-http at 4.1.125.Final.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+            <version>${spring-boot.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-codec-http</artifactId>
+            <version>${netty-codec-http.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

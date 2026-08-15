@@ -5,9 +5,9 @@ import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
 
 /**
- * Java agent that detects latent JVM linkage hazards from duplicate classes on the classpath.
- * Scans loaded bytecode for method calls and warns if those methods are missing in alternative
- * runtime definitions of the same class.
+ * Java agent that detects latent JVM linkage hazards on the effective runtime classpath.
+ * It scans call sites and warns when the class the JVM will resolve does not provide the method
+ * a caller was compiled against.
  */
 public class ShadyAgent {
     
@@ -26,7 +26,7 @@ public class ShadyAgent {
             // Initialize the detector
             detector = new LinkageHazardDetector();
             
-            // Scan the classpath for duplicate classes
+            // Index the effective runtime classpath and analyze all indexed call sites.
             detector.scanClasspath();
             
             // Register transformer to scan loaded classes
