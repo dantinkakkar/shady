@@ -55,6 +55,43 @@ class OpenSourceLinkageRegressionTest {
                 null);
     }
 
+    @Test
+    void catchesDaggerGuavaIssue4658() {
+        // Reported 2025-03-25: https://github.com/google/dagger/issues/4658
+        assertReportedHazard(
+                "google/dagger#4658",
+                "dagger-compiler-2.56.1.jar",
+                "guava-32.1.2-jre.jar",
+                "com.google.common.graph.Graphs",
+                "reachableNodes(Lcom/google/common/graph/Graph;Ljava/lang/Object;)"
+                        + "Lcom/google/common/collect/ImmutableSet;",
+                "dagger.internal.codegen.extension.DaggerGraphs.unreachableNodes(");
+    }
+
+    @Test
+    void catchesKyuubiSnakeYamlIssue7114() {
+        // Reported 2025-06-25: https://github.com/apache/kyuubi/issues/7114
+        assertReportedHazard(
+                "apache/kyuubi#7114",
+                "kubernetes-client-5.12.2.jar",
+                "snakeyaml-2.2.jar",
+                "org.yaml.snakeyaml.constructor.SafeConstructor",
+                "<init>()V",
+                "io.fabric8.kubernetes.client.utils.Serialization.unmarshalYaml(");
+    }
+
+    @Test
+    void catchesSpringdocSpringFrameworkIssue3041() {
+        // Reported 2025-07-08: https://github.com/springdoc/springdoc-openapi/issues/3041
+        assertReportedHazard(
+                "springdoc/springdoc-openapi#3041",
+                "springdoc-openapi-starter-common-2.5.0.jar",
+                "spring-web-6.2.8.jar",
+                "org.springframework.web.method.ControllerAdviceBean",
+                "<init>(Ljava/lang/Object;)V",
+                "org.springdoc.core.service.GenericResponseService.lambda$getGenericMapResponse$");
+    }
+
     private void assertReportedHazard(String issue, String callerJarName, String targetJarName,
                                       String targetClass, String methodSignature,
                                       String callerPrefix, String... supportingJarNames) {
