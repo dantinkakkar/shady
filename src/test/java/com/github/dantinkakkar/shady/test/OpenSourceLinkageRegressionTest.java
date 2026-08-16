@@ -60,7 +60,7 @@ class OpenSourceLinkageRegressionTest {
         // Reported 2025-03-25: https://github.com/google/dagger/issues/4658
         assertReportedHazard(
                 "google/dagger#4658",
-                "dagger-compiler-2.56.1.jar",
+                "dagger-spi-2.56.1.jar",
                 "guava-32.1.2-jre.jar",
                 "com.google.common.graph.Graphs",
                 "reachableNodes(Lcom/google/common/graph/Graph;Ljava/lang/Object;)"
