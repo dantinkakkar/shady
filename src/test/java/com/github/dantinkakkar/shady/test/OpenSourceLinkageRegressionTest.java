@@ -31,15 +31,16 @@ class OpenSourceLinkageRegressionTest {
     }
 
     @Test
-    void catchesLettuceReactorIssue9147() {
-        // https://github.com/open-telemetry/opentelemetry-java-instrumentation/issues/9147
+    void catchesLettuceReactorIssue10997() {
+        // https://github.com/open-telemetry/opentelemetry-java-instrumentation/issues/10997
         assertReportedHazard(
-                "open-telemetry/opentelemetry-java-instrumentation#9147",
+                "open-telemetry/opentelemetry-java-instrumentation#10997",
                 "lettuce-core-6.1.10.RELEASE.jar",
                 "reactor-core-3.5.3.jar",
                 "reactor.core.publisher.Mono",
                 "subscriberContext()Lreactor/core/publisher/Mono;",
-                "io.lettuce.core.tracing.Tracing.getContext(");
+                "io.lettuce.core.tracing.Tracing.getContext(",
+                "reactive-streams-1.0.4.jar");
     }
 
     @Test
@@ -56,13 +57,22 @@ class OpenSourceLinkageRegressionTest {
 
     private void assertReportedHazard(String issue, String callerJarName, String targetJarName,
                                       String targetClass, String methodSignature,
-                                      String callerPrefix) {
+                                      String callerPrefix, String... supportingJarNames) {
         Path callerJar = findClasspathEntry(callerJarName);
         Path targetJar = findClasspathEntry(targetJarName);
 
+        StringBuilder fixtureClasspath = new StringBuilder()
+                .append(callerJar)
+                .append(File.pathSeparator)
+                .append(targetJar);
+        for (String supportingJarName : supportingJarNames) {
+            fixtureClasspath.append(File.pathSeparator)
+                    .append(findClasspathEntry(supportingJarName));
+        }
+
         System.out.println("=== OPEN-SOURCE REGRESSION: " + issue + " ===");
         LinkageHazardDetector detector = new LinkageHazardDetector();
-        detector.scanClasspath(callerJar + File.pathSeparator + targetJar);
+        detector.scanClasspath(fixtureClasspath.toString());
 
         assertFalse(detector.getDuplicateClasses().containsKey(targetClass),
                 "The reported failure must not depend on a duplicate target class");
