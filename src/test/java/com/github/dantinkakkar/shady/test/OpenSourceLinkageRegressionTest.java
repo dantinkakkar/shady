@@ -25,9 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OpenSourceLinkageRegressionTest {
 
     @Test
-    void catchesJacksonDatabindIssue3429BeforeTheJvmFailsAtRuntime() throws Exception {
+    void catchesJacksonDatabindIssue3429() {
         // https://github.com/FasterXML/jackson-databind/issues/3429
-        LinkageHazard predicted = assertReportedHazard(
+        assertReportedHazard(
                 "FasterXML/jackson-databind#3429",
                 "jackson-databind-2.13.2.jar",
                 "jackson-core-2.11.4.jar",
@@ -35,17 +35,6 @@ class OpenSourceLinkageRegressionTest {
                 "getReadCapabilities()"
                         + "Lcom/fasterxml/jackson/core/util/JacksonFeatureSet;",
                 null);
-
-        NoSuchMethodError actual = reproduceJacksonDatabindIssue3429();
-        assertTrue(actual.getMessage().contains(predicted.getTargetClassName()));
-        assertTrue(actual.getMessage().contains("getReadCapabilities"));
-        assertTrue(Arrays.stream(actual.getStackTrace()).anyMatch(frame ->
-                        "com.fasterxml.jackson.databind.DeserializationContext"
-                                .equals(frame.getClassName())),
-                "The runtime failure should originate at the call site Shady analyzed");
-
-        System.out.println("[Runtime proof] The JVM failed exactly as Shady predicted:");
-        actual.printStackTrace(System.out);
     }
 
     @Test
@@ -74,9 +63,9 @@ class OpenSourceLinkageRegressionTest {
     }
 
     @Test
-    void catchesDaggerGuavaIssue4658() {
+    void catchesDaggerGuavaIssue4658BeforeTheJvmFailsAtRuntime() throws Exception {
         // Reported 2025-03-25: https://github.com/google/dagger/issues/4658
-        assertReportedHazard(
+        LinkageHazard predicted = assertReportedHazard(
                 "google/dagger#4658",
                 "dagger-spi-2.56.1.jar",
                 "guava-32.1.2-jre.jar",
@@ -84,6 +73,18 @@ class OpenSourceLinkageRegressionTest {
                 "reachableNodes(Lcom/google/common/graph/Graph;Ljava/lang/Object;)"
                         + "Lcom/google/common/collect/ImmutableSet;",
                 "dagger.internal.codegen.extension.DaggerGraphs.unreachableNodes(");
+
+        NoSuchMethodError actual = reproduceDaggerGuavaIssue4658();
+        assertTrue(actual.getMessage().contains(predicted.getTargetClassName()));
+        assertTrue(actual.getMessage().contains("reachableNodes"));
+        assertTrue(Arrays.stream(actual.getStackTrace()).anyMatch(frame ->
+                        "dagger.internal.codegen.extension.DaggerGraphs"
+                                .equals(frame.getClassName())
+                                && "unreachableNodes".equals(frame.getMethodName())),
+                "The runtime failure should originate at the call site Shady analyzed");
+
+        System.out.println("[Runtime proof] The JVM failed exactly as Shady predicted:");
+        actual.printStackTrace(System.out);
     }
 
     @Test
@@ -150,27 +151,31 @@ class OpenSourceLinkageRegressionTest {
         return hazard;
     }
 
-    /**
-     * Executes the ordinary Jackson API reported in #3429 inside an isolated class loader.
-     * Isolation guarantees that the failure comes from exactly the three fixture JARs, rather
-     * than from whichever Jackson versions Maven or Surefire happened to load first.
-     */
-    private NoSuchMethodError reproduceJacksonDatabindIssue3429() throws Exception {
-        URL[] incompatibleJacksonRuntime = {
-                findClasspathEntry("jackson-databind-2.13.2.jar").toUri().toURL(),
-                findClasspathEntry("jackson-core-2.11.4.jar").toUri().toURL(),
-                findClasspathEntry("jackson-annotations-2.13.2.jar").toUri().toURL()
+    /** Execute the public #4658 artifact pair in isolation, then enter the reported call site. */
+    private NoSuchMethodError reproduceDaggerGuavaIssue4658() throws Exception {
+        URL[] incompatibleDaggerRuntime = {
+                findClasspathEntry("dagger-spi-2.56.1.jar").toUri().toURL(),
+                findClasspathEntry("guava-32.1.2-jre.jar").toUri().toURL()
         };
 
         try (URLClassLoader loader = new URLClassLoader(
-                incompatibleJacksonRuntime, ClassLoader.getPlatformClassLoader())) {
-            Class<?> objectMapperClass = loader.loadClass(
-                    "com.fasterxml.jackson.databind.ObjectMapper");
-            Object objectMapper = objectMapperClass.getConstructor().newInstance();
+                incompatibleDaggerRuntime, ClassLoader.getPlatformClassLoader())) {
+            Class<?> graphBuilderClass = loader.loadClass(
+                    "com.google.common.graph.GraphBuilder");
+            Object graphBuilder = graphBuilderClass.getMethod("directed").invoke(null);
+            Object graph = graphBuilderClass.getMethod("build").invoke(graphBuilder);
+            Class<?> mutableGraphClass = loader.loadClass("com.google.common.graph.MutableGraph");
+            mutableGraphClass.getMethod("addNode", Object.class).invoke(graph, "root");
+
+            Class<?> graphClass = loader.loadClass("com.google.common.graph.Graph");
+            Class<?> daggerGraphsClass = loader.loadClass(
+                    "dagger.internal.codegen.extension.DaggerGraphs");
+            java.lang.reflect.Method unreachableNodes = daggerGraphsClass.getDeclaredMethod(
+                    "unreachableNodes", graphClass, Object.class);
+            unreachableNodes.setAccessible(true);
 
             InvocationTargetException invocation = assertThrows(InvocationTargetException.class,
-                    () -> objectMapperClass.getMethod("readValue", String.class, Class.class)
-                            .invoke(objectMapper, "{\"answer\":42}", Object.class));
+                    () -> unreachableNodes.invoke(null, graph, "root"));
             return assertInstanceOf(NoSuchMethodError.class, invocation.getCause());
         }
     }
