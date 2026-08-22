@@ -5,11 +5,18 @@ import com.github.dantinkakkar.shady.LinkageHazardDetector.LinkageHazard;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Reproduces method-linkage failures reported by independent open-source projects.
@@ -56,9 +63,9 @@ class OpenSourceLinkageRegressionTest {
     }
 
     @Test
-    void catchesDaggerGuavaIssue4658() {
+    void catchesDaggerGuavaIssue4658BeforeTheJvmFailsAtRuntime() throws Exception {
         // Reported 2025-03-25: https://github.com/google/dagger/issues/4658
-        assertReportedHazard(
+        LinkageHazard predicted = assertReportedHazard(
                 "google/dagger#4658",
                 "dagger-spi-2.56.1.jar",
                 "guava-32.1.2-jre.jar",
@@ -66,6 +73,18 @@ class OpenSourceLinkageRegressionTest {
                 "reachableNodes(Lcom/google/common/graph/Graph;Ljava/lang/Object;)"
                         + "Lcom/google/common/collect/ImmutableSet;",
                 "dagger.internal.codegen.extension.DaggerGraphs.unreachableNodes(");
+
+        NoSuchMethodError actual = reproduceDaggerGuavaIssue4658();
+        assertTrue(actual.getMessage().contains(predicted.getTargetClassName()));
+        assertTrue(actual.getMessage().contains("reachableNodes"));
+        assertTrue(Arrays.stream(actual.getStackTrace()).anyMatch(frame ->
+                        "dagger.internal.codegen.extension.DaggerGraphs"
+                                .equals(frame.getClassName())
+                                && "unreachableNodes".equals(frame.getMethodName())),
+                "The runtime failure should originate at the call site Shady analyzed");
+
+        System.out.println("[Runtime proof] The JVM failed exactly as Shady predicted:");
+        actual.printStackTrace(System.out);
     }
 
     @Test
@@ -92,9 +111,10 @@ class OpenSourceLinkageRegressionTest {
                 "org.springdoc.core.service.GenericResponseService.lambda$getGenericMapResponse$");
     }
 
-    private void assertReportedHazard(String issue, String callerJarName, String targetJarName,
-                                      String targetClass, String methodSignature,
-                                      String callerPrefix, String... supportingJarNames) {
+    private LinkageHazard assertReportedHazard(String issue, String callerJarName,
+                                               String targetJarName, String targetClass,
+                                               String methodSignature, String callerPrefix,
+                                               String... supportingJarNames) {
         Path callerJar = findClasspathEntry(callerJarName);
         Path targetJar = findClasspathEntry(targetJarName);
 
@@ -128,6 +148,36 @@ class OpenSourceLinkageRegressionTest {
                 hazard.getTargetLocation());
         System.out.println("[Shady test] Matched reported failure: " + hazard);
         System.out.println("=== END OPEN-SOURCE REGRESSION: " + issue + " ===");
+        return hazard;
+    }
+
+    /** Execute the public #4658 artifact pair in isolation, then enter the reported call site. */
+    private NoSuchMethodError reproduceDaggerGuavaIssue4658() throws Exception {
+        URL[] incompatibleDaggerRuntime = {
+                findClasspathEntry("dagger-spi-2.56.1.jar").toUri().toURL(),
+                findClasspathEntry("guava-32.1.2-jre.jar").toUri().toURL()
+        };
+
+        try (URLClassLoader loader = new URLClassLoader(
+                incompatibleDaggerRuntime, ClassLoader.getPlatformClassLoader())) {
+            Class<?> graphBuilderClass = loader.loadClass(
+                    "com.google.common.graph.GraphBuilder");
+            Object graphBuilder = graphBuilderClass.getMethod("directed").invoke(null);
+            Object graph = graphBuilderClass.getMethod("build").invoke(graphBuilder);
+            Class<?> mutableGraphClass = loader.loadClass("com.google.common.graph.MutableGraph");
+            mutableGraphClass.getMethod("addNode", Object.class).invoke(graph, "root");
+
+            Class<?> graphClass = loader.loadClass("com.google.common.graph.Graph");
+            Class<?> daggerGraphsClass = loader.loadClass(
+                    "dagger.internal.codegen.extension.DaggerGraphs");
+            java.lang.reflect.Method unreachableNodes = daggerGraphsClass.getDeclaredMethod(
+                    "unreachableNodes", graphClass, Object.class);
+            unreachableNodes.setAccessible(true);
+
+            InvocationTargetException invocation = assertThrows(InvocationTargetException.class,
+                    () -> unreachableNodes.invoke(null, graph, "root"));
+            return assertInstanceOf(NoSuchMethodError.class, invocation.getCause());
+        }
     }
 
     private static Path findClasspathEntry(String fileName) {
