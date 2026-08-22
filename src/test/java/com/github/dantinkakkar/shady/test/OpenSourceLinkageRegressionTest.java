@@ -5,11 +5,18 @@ import com.github.dantinkakkar.shady.LinkageHazardDetector.LinkageHazard;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Reproduces method-linkage failures reported by independent open-source projects.
@@ -18,9 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class OpenSourceLinkageRegressionTest {
 
     @Test
-    void catchesJacksonDatabindIssue3429() {
+    void catchesJacksonDatabindIssue3429BeforeTheJvmFailsAtRuntime() throws Exception {
         // https://github.com/FasterXML/jackson-databind/issues/3429
-        assertReportedHazard(
+        LinkageHazard predicted = assertReportedHazard(
                 "FasterXML/jackson-databind#3429",
                 "jackson-databind-2.13.2.jar",
                 "jackson-core-2.11.4.jar",
@@ -28,6 +35,17 @@ class OpenSourceLinkageRegressionTest {
                 "getReadCapabilities()"
                         + "Lcom/fasterxml/jackson/core/util/JacksonFeatureSet;",
                 null);
+
+        NoSuchMethodError actual = reproduceJacksonDatabindIssue3429();
+        assertTrue(actual.getMessage().contains(predicted.getTargetClassName()));
+        assertTrue(actual.getMessage().contains("getReadCapabilities"));
+        assertTrue(Arrays.stream(actual.getStackTrace()).anyMatch(frame ->
+                        "com.fasterxml.jackson.databind.DeserializationContext"
+                                .equals(frame.getClassName())),
+                "The runtime failure should originate at the call site Shady analyzed");
+
+        System.out.println("[Runtime proof] The JVM failed exactly as Shady predicted:");
+        actual.printStackTrace(System.out);
     }
 
     @Test
@@ -92,9 +110,10 @@ class OpenSourceLinkageRegressionTest {
                 "org.springdoc.core.service.GenericResponseService.lambda$getGenericMapResponse$");
     }
 
-    private void assertReportedHazard(String issue, String callerJarName, String targetJarName,
-                                      String targetClass, String methodSignature,
-                                      String callerPrefix, String... supportingJarNames) {
+    private LinkageHazard assertReportedHazard(String issue, String callerJarName,
+                                               String targetJarName, String targetClass,
+                                               String methodSignature, String callerPrefix,
+                                               String... supportingJarNames) {
         Path callerJar = findClasspathEntry(callerJarName);
         Path targetJar = findClasspathEntry(targetJarName);
 
@@ -128,6 +147,32 @@ class OpenSourceLinkageRegressionTest {
                 hazard.getTargetLocation());
         System.out.println("[Shady test] Matched reported failure: " + hazard);
         System.out.println("=== END OPEN-SOURCE REGRESSION: " + issue + " ===");
+        return hazard;
+    }
+
+    /**
+     * Executes the ordinary Jackson API reported in #3429 inside an isolated class loader.
+     * Isolation guarantees that the failure comes from exactly the three fixture JARs, rather
+     * than from whichever Jackson versions Maven or Surefire happened to load first.
+     */
+    private NoSuchMethodError reproduceJacksonDatabindIssue3429() throws Exception {
+        URL[] incompatibleJacksonRuntime = {
+                findClasspathEntry("jackson-databind-2.13.2.jar").toUri().toURL(),
+                findClasspathEntry("jackson-core-2.11.4.jar").toUri().toURL(),
+                findClasspathEntry("jackson-annotations-2.13.2.jar").toUri().toURL()
+        };
+
+        try (URLClassLoader loader = new URLClassLoader(
+                incompatibleJacksonRuntime, ClassLoader.getPlatformClassLoader())) {
+            Class<?> objectMapperClass = loader.loadClass(
+                    "com.fasterxml.jackson.databind.ObjectMapper");
+            Object objectMapper = objectMapperClass.getConstructor().newInstance();
+
+            InvocationTargetException invocation = assertThrows(InvocationTargetException.class,
+                    () -> objectMapperClass.getMethod("readValue", String.class, Class.class)
+                            .invoke(objectMapper, "{\"answer\":42}", Object.class));
+            return assertInstanceOf(NoSuchMethodError.class, invocation.getCause());
+        }
     }
 
     private static Path findClasspathEntry(String fileName) {
