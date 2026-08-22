@@ -8,26 +8,31 @@ on:
 
 jobs:
   build-and-test:
+    name: Java ${{ matrix.java }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        java: [ '11', '17', '21', '25' ]
+
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Set up JDK 11
+
+    - name: Set up JDK ${{ matrix.java }}
       uses: actions/setup-java@v4
       with:
-        java-version: '11'
+        java-version: ${{ matrix.java }}
         distribution: 'temurin'
         cache: maven
-    
+
     - name: Build agent JAR
       run: mvn -B clean package -DskipTests
-    
+
     - name: Run tests with Java agent
       run: mvn -B test
-      
+
     - name: Display test results
       if: always()
       run: |
