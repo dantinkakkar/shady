@@ -2,12 +2,14 @@ package com.github.dantinkakkar.shady.test;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -72,12 +74,31 @@ class CurrentOssRegressionAgentTest {
                 .directory(directory.toFile())
                 .redirectErrorStream(true)
                 .start();
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        AtomicReference<IOException> readFailure = new AtomicReference<>();
+        Thread outputReader = new Thread(() -> {
+            try {
+                process.getInputStream().transferTo(output);
+            } catch (IOException e) {
+                readFailure.set(e);
+            }
+        }, "shady-test-process-output");
+        outputReader.start();
+
         if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
             process.destroyForcibly();
+            outputReader.join(TimeUnit.SECONDS.toMillis(5));
             throw new AssertionError("Process did not exit within " + timeoutSeconds + " seconds");
         }
-        return new ProcessResult(process.exitValue(),
-                new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+        outputReader.join(TimeUnit.SECONDS.toMillis(10));
+        if (outputReader.isAlive()) {
+            throw new AssertionError("Could not finish reading process output");
+        }
+        if (readFailure.get() != null) {
+            throw new IOException("Could not read process output", readFailure.get());
+        }
+        return new ProcessResult(process.exitValue(), output.toString(StandardCharsets.UTF_8));
     }
 
     private static String mavenExecutable() {
