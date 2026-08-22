@@ -161,6 +161,60 @@
             <version>6.2.8</version>
             <scope>test</scope>
         </dependency>
+
+        <!--
+          2026 regression (logback/SLF4J): logback-classic 1.5.x was compiled against SLF4J 2.x.
+          Apache Flink 1.20.1 forces slf4j-api to 1.7.36, so projects that add logback-classic
+          to a Flink application end up with an incompatible SLF4J API on the classpath.
+          slf4j-api-1.7.36 cannot be placed directly on the test classpath without breaking the
+          test process itself; it is instead downloaded via the dependency plugin (see below).
+        -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.5.18</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-core</artifactId>
+            <version>1.5.18</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          2026 regression (Hibernate / Jakarta Persistence): Hibernate ORM 6.2+ targets the
+          jakarta.persistence-api 3.1 API.  Jakarta EE 9.x platforms ship 3.0.x, which is missing
+          the two-argument (String, Throwable cause) exception constructors that Hibernate 6.6
+          calls inside ExceptionConverterImpl.
+        -->
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-core</artifactId>
+            <version>6.6.13.Final</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.persistence</groupId>
+            <artifactId>jakarta.persistence-api</artifactId>
+            <version>3.0.0</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+          2026 regression (Spring Security / Spring Expression): Spring Security 6.4 calls
+          BeanReference.getName() which was added to SpEL in Spring Framework 6.2.  A project
+          that pins spring-expression at 6.1.x (e.g. via an enforced Spring Boot 3.2.x platform)
+          while pulling in spring-security-core 6.4.x hits a NoSuchMethodError.
+          spring-expression 6.1.21 cannot be placed on the live test classpath without globally
+          downgrading it for the whole suite; it is downloaded by the plugin below instead.
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-core</artifactId>
+            <version>6.4.5</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -236,7 +290,77 @@
                 <version>3.2.2</version>
                 <configuration>
                     <argLine>-javaagent:${project.build.directory}/${project.build.finalName}.jar</argLine>
+                    <systemPropertyVariables>
+                        <shady.fixture.jar.dir>${project.build.directory}/fixture-jars</shady.fixture.jar.dir>
+                    </systemPropertyVariables>
                 </configuration>
+            </plugin>
+
+            <!--
+              Pre-fetch versioned JARs that are used as isolated regression fixtures but cannot
+              be placed on the live test classpath without causing version conflicts or breaking
+              the test process itself (e.g. downgrading SLF4J from 2.x would crash logback).
+              The tests locate these JARs via the shady.fixture.jar.dir system property.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.8.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-regression-fixture-jars</id>
+                        <phase>generate-test-resources</phase>
+                        <goals>
+                            <goal>copy</goal>
+                        </goals>
+                        <configuration>
+                            <artifactItems>
+                                <!-- SLF4J 1.7.36 (Flink-era; incompatible with logback 1.5.x) -->
+                                <artifactItem>
+                                    <groupId>org.slf4j</groupId>
+                                    <artifactId>slf4j-api</artifactId>
+                                    <version>1.7.36</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                                <!-- Spring Expression 6.1.21 (missing BeanReference.getName) -->
+                                <artifactItem>
+                                    <groupId>org.springframework</groupId>
+                                    <artifactId>spring-expression</artifactId>
+                                    <version>6.1.21</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                                <!-- Spring Core 6.1.21 (missing PropertyPlaceholderHelper ctor) -->
+                                <artifactItem>
+                                    <groupId>org.springframework</groupId>
+                                    <artifactId>spring-core</artifactId>
+                                    <version>6.1.21</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                                <!-- Jackson Databind 2.18.3 (calls BufferRecycler.releaseToPool) -->
+                                <artifactItem>
+                                    <groupId>com.fasterxml.jackson.core</groupId>
+                                    <artifactId>jackson-databind</artifactId>
+                                    <version>2.18.3</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                                <!-- Jackson Core 2.15.4 (lacks releaseToPool; managed by SB 3.2.x) -->
+                                <artifactItem>
+                                    <groupId>com.fasterxml.jackson.core</groupId>
+                                    <artifactId>jackson-core</artifactId>
+                                    <version>2.15.4</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                                <!-- Jackson Annotations 2.15.4 (supporting jar for Jackson scan) -->
+                                <artifactItem>
+                                    <groupId>com.fasterxml.jackson.core</groupId>
+                                    <artifactId>jackson-annotations</artifactId>
+                                    <version>2.15.4</version>
+                                    <outputDirectory>${project.build.directory}/fixture-jars</outputDirectory>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

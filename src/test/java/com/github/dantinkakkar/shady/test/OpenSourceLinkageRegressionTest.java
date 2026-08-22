@@ -8,6 +8,7 @@ import java.io.File;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.regex.Pattern;
@@ -111,12 +112,106 @@ class OpenSourceLinkageRegressionTest {
                 "org.springdoc.core.service.GenericResponseService.lambda$getGenericMapResponse$");
     }
 
+    @Test
+    void catchesLogbackSlf4jApiMismatchInFlinkApplications() {
+        // Exploratory 2026-08-22: Apache Flink 1.20.1 declares slf4j-api:1.7.36 as a direct
+        // dependency, overriding any newer transitive requirement.  logback-classic 1.5.x was
+        // compiled against SLF4J 2.x and calls methods on org.slf4j.event.LoggingEvent (e.g.
+        // getCallerBoundary, getMarkers, getKeyValuePairs) that simply do not exist in 1.7.x.
+        // Any Flink project that adds logback-classic for structured logging silently carries
+        // this hazard until a structured-logging code path executes.
+        assertReportedHazard(
+                "apache/flink#logback-slf4j-2026",
+                "logback-classic-1.5.18.jar",
+                "slf4j-api-1.7.36.jar",
+                "org.slf4j.event.LoggingEvent",
+                "getCallerBoundary()Ljava/lang/String;",
+                "ch.qos.logback.classic.Logger.log(",
+                "logback-core-1.5.18.jar");
+    }
+
+    @Test
+    void catchesHibernateOrmJakartaPersistenceMismatch() {
+        // Exploratory 2026-08-22: Hibernate ORM 6.2+ targets the jakarta.persistence-api 3.1 API
+        // (Jakarta EE 10).  EE 9.x platforms still ship jakarta.persistence-api 3.0.x, which is
+        // missing the two-argument constructors EntityNotFoundException(String, Exception) and
+        // NonUniqueResultException(String, Exception) that Hibernate 6.6 calls inside
+        // ExceptionConverterImpl.  A Maven or Gradle project that imports a Jakarta EE 9.x BOM
+        // while pulling in Hibernate 6.6.x will hit NoSuchMethodError the first time an entity
+        // lookup fails or a non-unique query result is returned.
+        assertReportedHazard(
+                "hibernate/hibernate-orm#jakarta-persistence-3.0-2026",
+                "hibernate-core-6.6.13.Final.jar",
+                "jakarta.persistence-api-3.0.0.jar",
+                "jakarta.persistence.EntityNotFoundException",
+                "<init>(Ljava/lang/String;Ljava/lang/Exception;)V",
+                "org.hibernate.internal.ExceptionConverterImpl.convert(");
+    }
+
+    @Test
+    void catchesSpringSecuritySpelBeanReferenceGetName() {
+        // Exploratory 2026-08-22: Spring Security 6.4 calls
+        // org.springframework.expression.spel.ast.BeanReference.getName(), a method added in
+        // Spring Framework 6.2.  A Gradle project that uses
+        //   enforcedPlatform("org.springframework.boot:spring-boot-dependencies:3.2.x")
+        // will have spring-expression pinned at the 6.1.x series while spring-security-core is
+        // resolved at 6.4.x from a direct dependency, silently combining incompatible artifacts.
+        // The hazard fires when a @PreAuthorize expression containing a bean reference is
+        // evaluated for the first time.
+        assertReportedHazard(
+                "spring-projects/spring-security#spel-beanref-2026",
+                "spring-security-core-6.4.5.jar",
+                "spring-expression-6.1.21.jar",
+                "org.springframework.expression.spel.ast.BeanReference",
+                "getName()Ljava/lang/String;",
+                "org.springframework.security.aot.hint"
+                        + ".PrePostAuthorizeExpressionBeanHintsRegistrar.resolveBeanNames(",
+                "spring-core-6.1.21.jar");
+    }
+
+    @Test
+    void catchesSpringSecurityPropertyPlaceholderHelperConstructor() {
+        // Exploratory 2026-08-22: Spring Security 6.4 also calls a five-argument
+        // PropertyPlaceholderHelper constructor added in Spring Core 6.2.  Same root cause as
+        // the SpEL BeanReference finding above: a Spring Boot 3.2.x enforced platform pins
+        // spring-core at 6.1.x while spring-security-core 6.4.x is used directly, producing
+        // two distinct NoSuchMethodError traps in the same version-skew scenario.
+        assertReportedHazard(
+                "spring-projects/spring-security#placeholder-helper-2026",
+                "spring-security-core-6.4.5.jar",
+                "spring-core-6.1.21.jar",
+                "org.springframework.util.PropertyPlaceholderHelper",
+                "<init>(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;"
+                        + "Ljava/lang/Character;Z)V",
+                "org.springframework.security.core.annotation"
+                        + ".ExpressionTemplateSecurityAnnotationScanner.resolvePlaceholders(");
+    }
+
+    @Test
+    void catchesJacksonDatabind218BufferRecyclerMismatch() {
+        // Exploratory 2026-08-22: jackson-databind 2.18 added calls to
+        // BufferRecycler.releaseToPool() and ByteArrayBuilder.getClearAndRelease(), new resource-
+        // management methods introduced in jackson-core 2.16.  Any project that uses
+        //   enforcedPlatform("org.springframework.boot:spring-boot-dependencies:3.2.x")
+        // will have jackson-core locked at the 2.15.x series managed by that BOM, while a direct
+        // dependency on jackson-databind 2.18.x creates the incompatibility.  The hazard fires on
+        // any ObjectMapper.writeValueAsString / writeValueAsBytes call.
+        assertReportedHazard(
+                "FasterXML/jackson-databind#bufferrecycler-2026",
+                "jackson-databind-2.18.3.jar",
+                "jackson-core-2.15.4.jar",
+                "com.fasterxml.jackson.core.util.BufferRecycler",
+                "releaseToPool()V",
+                "com.fasterxml.jackson.databind.ObjectMapper.writeValueAsString(",
+                "jackson-annotations-2.15.4.jar");
+    }
+
     private LinkageHazard assertReportedHazard(String issue, String callerJarName,
                                                String targetJarName, String targetClass,
                                                String methodSignature, String callerPrefix,
                                                String... supportingJarNames) {
-        Path callerJar = findClasspathEntry(callerJarName);
-        Path targetJar = findClasspathEntry(targetJarName);
+        Path callerJar = findFixtureJar(callerJarName);
+        Path targetJar = findFixtureJar(targetJarName);
 
         StringBuilder fixtureClasspath = new StringBuilder()
                 .append(callerJar)
@@ -124,7 +219,7 @@ class OpenSourceLinkageRegressionTest {
                 .append(targetJar);
         for (String supportingJarName : supportingJarNames) {
             fixtureClasspath.append(File.pathSeparator)
-                    .append(findClasspathEntry(supportingJarName));
+                    .append(findFixtureJar(supportingJarName));
         }
 
         System.out.println("=== OPEN-SOURCE REGRESSION: " + issue + " ===");
@@ -190,5 +285,34 @@ class OpenSourceLinkageRegressionTest {
             }
         }
         throw new AssertionError("Expected test fixture on classpath: " + fileName);
+    }
+
+    /**
+     * Locates a fixture JAR that cannot live on the live test classpath (e.g. it would cause
+     * a version conflict that breaks the test process). The Maven dependency plugin copies such
+     * JARs to {@code target/fixture-jars} before tests run; the directory is communicated via
+     * the {@code shady.fixture.jar.dir} system property set in the Surefire configuration.
+     */
+    private static Path findFixtureJar(String fileName) {
+        // 1. Classpath first — works for JARs that are safe to put there.
+        String[] entries = System.getProperty("java.class.path", "")
+                .split(Pattern.quote(File.pathSeparator));
+        for (String entry : entries) {
+            Path path = Path.of(entry).toAbsolutePath().normalize();
+            if (fileName.equals(path.getFileName().toString())) {
+                return path;
+            }
+        }
+        // 2. Fixture directory populated by maven-dependency-plugin:copy.
+        String fixtureDirProp = System.getProperty("shady.fixture.jar.dir");
+        if (fixtureDirProp != null) {
+            Path jar = Path.of(fixtureDirProp).resolve(fileName);
+            if (Files.exists(jar)) {
+                return jar;
+            }
+        }
+        throw new AssertionError(
+                "Expected test fixture on classpath or in fixture directory: " + fileName
+                + " (set shady.fixture.jar.dir to target/fixture-jars)");
     }
 }
