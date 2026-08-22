@@ -43,7 +43,8 @@ class GradleOssRegressionAgentTest {
 
         // 1. Build the fixture with Gradle and resolve the runtime classpath.
         ProcessResult build = run(180, fixture,
-                gradleExecutable(), "--no-daemon", "--quiet", "compileJava", "writeRuntimeClasspath");
+                fixture.resolve(gradleExecutable()).toString(),
+                "--no-daemon", "--quiet", "compileJava", "writeRuntimeClasspath");
         assertEquals(0, build.exitCode,
                 () -> "Could not build the Gradle Jackson application:\n" + build.output);
 
@@ -129,8 +130,9 @@ class GradleOssRegressionAgentTest {
     }
 
     private static String gradleExecutable() {
-        return System.getProperty("os.name").toLowerCase().contains("win")
-                ? "gradle.bat" : "gradle";
+        String wrapper = System.getProperty("os.name").toLowerCase().contains("win")
+                ? "gradlew.bat" : "gradlew";
+        return wrapper;
     }
 
     private static Path javaExecutable() {
