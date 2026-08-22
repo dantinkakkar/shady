@@ -84,6 +84,7 @@ class CurrentOssRegressionAgentTest {
                 readFailure.set(e);
             }
         }, "shady-test-process-output");
+        outputReader.setDaemon(true);
         outputReader.start();
 
         if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
